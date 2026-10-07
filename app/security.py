@@ -6,14 +6,24 @@ import hmac
 import json
 import os
 import secrets
+import time
 from typing import Annotated
+from urllib.parse import urlsplit
 
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
+from app.database import connect_db
+
 PASSWORD_SCHEME = "pbkdf2_sha256"
 PASSWORD_ITERATIONS = 600_000
+SESSION_COOKIE = "items_admin_session"
+SESSION_TTL_SECONDS = 12 * 60 * 60
 basic_auth = HTTPBasic(auto_error=False)
+
+
+class AdminLoginRequired(Exception):
+    pass
 
 
 def hash_password(password: str, *, salt: bytes | None = None) -> str:
@@ -56,6 +66,54 @@ def configured_users() -> dict[str, str]:
     return users
 
 
+def create_session_token(username: str) -> str:
+    token = secrets.token_urlsafe(32)
+    expires_at = int(time.time()) + SESSION_TTL_SECONDS
+    session_id_hash = hashlib.sha256(token.encode("ascii")).hexdigest()
+    with connect_db() as connection:
+        connection.execute(
+            "INSERT INTO admin_sessions(session_id_hash, username, expires_at) VALUES (?, ?, ?)",
+            (session_id_hash, username, expires_at),
+        )
+    return token
+
+
+def session_username(token: str | None, users: dict[str, str]) -> str | None:
+    if not token:
+        return None
+    try:
+        session_id_hash = hashlib.sha256(token.encode("ascii")).hexdigest()
+    except UnicodeEncodeError:
+        return None
+    with connect_db() as connection:
+        row = connection.execute(
+            "SELECT username FROM admin_sessions WHERE session_id_hash = ? AND expires_at > ?",
+            (session_id_hash, int(time.time())),
+        ).fetchone()
+    if row is None or row["username"] not in users:
+        return None
+    return row["username"]
+
+
+def revoke_session(token: str | None) -> None:
+    if not token:
+        return
+    try:
+        session_id_hash = hashlib.sha256(token.encode("ascii")).hexdigest()
+    except UnicodeEncodeError:
+        return
+    with connect_db() as connection:
+        connection.execute("DELETE FROM admin_sessions WHERE session_id_hash = ?", (session_id_hash,))
+
+
+def is_same_origin_request(request: Request) -> bool:
+    origin = request.headers.get("origin")
+    if not origin:
+        return False
+    parsed = urlsplit(origin)
+    return parsed.scheme == request.url.scheme and parsed.netloc == request.url.netloc
+
+
 async def require_admin(
     request: Request,
     credentials: Annotated[HTTPBasicCredentials | None, Depends(basic_auth)],
@@ -69,7 +127,16 @@ async def require_admin(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Administration is disabled until an administrator account is configured",
         )
+
+    cookie_username = session_username(request.cookies.get(SESSION_COOKIE), users)
+    if cookie_username:
+        if request.method not in {"GET", "HEAD", "OPTIONS"} and not is_same_origin_request(request):
+            raise HTTPException(status_code=403, detail="A same-origin request is required")
+        return cookie_username
+
     if credentials is None:
+        if request.url.path == "/manage":
+            raise AdminLoginRequired
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required",

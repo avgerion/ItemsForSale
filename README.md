@@ -7,38 +7,74 @@ A small, manual-first inventory app with a FastAPI API, SQLite storage, and a Bo
 - Python 3.11 or newer
 - An internet connection for installing the packages
 
-## Run locally
+## Run the server locally (Windows)
+
+Open PowerShell in the project folder:
 
 ```powershell
-py -m venv .venv
+Set-Location "C:\Users\avger\Offline\Documents\ItemsForSale"
+if (-not (Test-Path .venv)) { py -m venv .venv }
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
-Copy-Item .env.example .env
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 ```
 
-Configure one or more owner/helper accounts before opening the private management area:
+Generate an owner password hash:
 
 ```powershell
-python scripts\create_user.py
-$env:INVENTORY_USERS = '{"owner":"PASTE_THE_GENERATED_HASH_HERE"}'
+python -m scripts.create_user
 ```
 
-For additional helpers, generate a separate username/password hash and include each entry in the JSON object. Keep `INVENTORY_USERS` out of source control; for persistent local development, load it from a protected environment file or secret store. The app disables administration when no accounts are configured. Use unique strong passwords.
+Run this module command from the project folder, not as `python scripts\create_user.py`; module execution keeps the project root available so it can import the `app` package.
+
+Copy the printed JSON object into the `INVENTORY_USERS` line in `.env`, for example:
+
+```dotenv
+INVENTORY_USERS={"owner":"PASTE_THE_GENERATED_HASH_HERE"}
+```
+
+Do not commit `.env`. To add helpers, generate a hash for each account and include every username/hash pair in the same JSON object. The server must be restarted after changing `.env`.
+
+The owner workspace uses a sign-in page and an HTTP-only, server-side session cookie, so it works in browsers that do not show HTTP Basic Auth prompts. Sessions expire after 12 hours and are revoked when you sign out. Only a hash of each random session token is stored in the SQLite database.
 
 Set `PUBLIC_CATALOG_URL` to the public HTTPS catalog URL when deployed; contact messages include it when configured. Locally, the public page remains usable without this setting.
 
-Start the app:
+Start the development server in PowerShell:
 
 ```powershell
-python -m uvicorn app.main:app --reload
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
+
+Keep that PowerShell window open while using the app. The server runs in the foreground; closing the window or pressing **Ctrl+C** stops it. `127.0.0.1` is loopback, so these URLs work only on the same computer and only while the server is running.
 
 - Public catalog: <http://127.0.0.1:8000/>
 - Private management: <http://127.0.0.1:8000/manage>
 - API schema: <http://127.0.0.1:8000/docs>
 - Health: <http://127.0.0.1:8000/health>
 
-The management page uses HTTP Basic authentication. In `APP_ENV=production`, admin routes reject non-HTTPS requests. Put the app behind a correctly configured HTTPS reverse proxy or tunnel before making it internet-accessible; do not expose the SQLite database, uploads directory, or development server directly. Configure trusted proxy handling so the application can reliably determine that requests use HTTPS.
+Check that the server is responding from a second PowerShell window:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/health
+```
+
+It should return `status: ok`. If the connection is refused, confirm the first PowerShell window is still running and check its startup error output. If port 8000 is already in use, stop the other server or choose another port, then use that same port in the URLs.
+
+To check that the `.env` account list is being read, use this PowerShell here-string (it prints usernames only, never password hashes):
+
+```powershell
+@'
+import json
+from dotenv import dotenv_values
+
+users = json.loads(dotenv_values(".env").get("INVENTORY_USERS") or "{}")
+print("Configured users:", ", ".join(users) if users else "NONE")
+'@ | python -
+```
+
+The `--reload` option is for local development. Do not use the development server as an internet-facing production host.
+
+The sign-in form protects the management page and admin API; HTTP Basic credentials remain supported for API clients. In `APP_ENV=production`, admin routes reject non-HTTPS requests. Put the app behind a correctly configured HTTPS reverse proxy or tunnel before making it internet-accessible; do not expose the SQLite database, uploads directory, or development server directly. Configure trusted proxy handling so the application can reliably determine that requests use HTTPS.
 
 ## Owner workspace
 

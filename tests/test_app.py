@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -62,6 +63,63 @@ def create_item(client: TestClient, headers: dict, **overrides) -> dict:
 def test_admin_fails_closed_until_accounts_are_configured(client):
     assert client.get("/manage").status_code == 503
     assert client.get("/api/admin/items").status_code == 503
+
+
+def test_admin_page_redirects_to_login_when_accounts_are_configured(client, admin_headers):
+    response = client.get("/manage")
+    assert response.status_code == 200
+    assert response.url.path == "/login"
+    assert "Sign in to manage your inventory" in response.text
+
+
+def test_login_creates_session_and_logout_clears_it(client, admin_headers):
+    client.get("/api/admin/items", headers=admin_headers)
+    login_page = client.get("/login")
+    csrf = re.search(r'name="csrf_token" value="([^"]+)"', login_page.text)
+    assert csrf
+
+    login_response = client.post(
+        "/login",
+        data={
+            "username": "owner",
+            "password": "correct horse battery staple 2026",
+            "csrf_token": csrf.group(1),
+        },
+        follow_redirects=False,
+    )
+    assert login_response.status_code == 303
+    assert login_response.headers["location"] == "/manage"
+    cookie = client.cookies.get("items_admin_session")
+    assert cookie
+    assert client.get("/api/admin/items").status_code == 200
+
+    logout_response = client.post(
+        "/logout",
+        headers={"origin": "http://testserver"},
+        follow_redirects=False,
+    )
+    assert logout_response.status_code == 303
+    assert client.cookies.get("items_admin_session") is None
+    assert client.get("/api/admin/items").status_code == 401
+    client.cookies.set("items_admin_session", cookie)
+    assert client.get("/api/admin/items").status_code == 401
+
+
+def test_login_rejects_invalid_credentials_and_bad_csrf(client, admin_headers):
+    csrf = re.search(r'name="csrf_token" value="([^"]+)"', client.get("/login").text)
+    assert csrf
+    invalid_password = client.post(
+        "/login",
+        data={"username": "owner", "password": "wrong password", "csrf_token": csrf.group(1)},
+    )
+    assert invalid_password.status_code == 401
+    assert "Username or password is incorrect" in invalid_password.text
+
+    bad_csrf = client.post(
+        "/login",
+        data={"username": "owner", "password": "correct horse battery staple 2026", "csrf_token": "bad-token"},
+    )
+    assert bad_csrf.status_code == 403
 
 
 def test_public_catalog_returns_only_published_available_inventory(client, admin_headers):

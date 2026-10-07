@@ -60,6 +60,12 @@ CREATE TABLE IF NOT EXISTS sale_events (
     created_at TEXT NOT NULL,
     CHECK (ends_at > starts_at)
 );
+
+CREATE TABLE IF NOT EXISTS admin_sessions (
+    session_id_hash TEXT PRIMARY KEY,
+    username TEXT NOT NULL,
+    expires_at INTEGER NOT NULL
+);
 """
 
 

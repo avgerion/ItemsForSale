@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import html
+import hmac
 import io
 import os
 import sqlite3
+import secrets
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -25,13 +27,23 @@ from bokeh.models import (
     TextInput,
 )
 from bokeh.resources import CDN
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile, status
-from fastapi.responses import HTMLResponse, Response
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, status
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .database import UPLOAD_DIR, connect_db, initialize_database
-from .security import require_admin
+from .security import (
+    SESSION_COOKIE,
+    SESSION_TTL_SECONDS,
+    AdminLoginRequired,
+    configured_users,
+    create_session_token,
+    hash_password,
+    require_admin,
+    revoke_session,
+    verify_password,
+)
 
 Condition = Literal["new_sealed", "open_box", "used_good", "used_fair", "for_parts_untested"]
 Availability = Literal["available", "reserved", "sold", "hidden"]
@@ -302,6 +314,86 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+
+@app.exception_handler(AdminLoginRequired)
+async def redirect_to_login(_: Request, __: AdminLoginRequired) -> RedirectResponse:
+    return RedirectResponse(url="/login", status_code=status.HTTP_303_SEE_OTHER)
+
+
+def login_form_response(*, error: str = "", response_status: int = status.HTTP_200_OK) -> HTMLResponse:
+    token = secrets.token_urlsafe(24)
+    template = (Path(__file__).resolve().parent / "templates" / "login.html").read_text(encoding="utf-8")
+    rendered = template.replace("__CSRF_TOKEN__", html.escape(token, quote=True))
+    rendered = rendered.replace("__ERROR__", f'<p class="error" role="alert">{html.escape(error)}</p>' if error else "")
+    response = HTMLResponse(rendered, status_code=response_status, headers={"Cache-Control": "no-store"})
+    response.set_cookie(
+        "items_login_csrf",
+        token,
+        max_age=600,
+        path="/login",
+        secure=os.environ.get("APP_ENV", "development").lower() == "production",
+        httponly=True,
+        samesite="strict",
+    )
+    return response
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_page() -> HTMLResponse:
+    return login_form_response()
+
+
+@app.post("/login", response_class=HTMLResponse)
+def login(
+    request: Request,
+    username: Annotated[str, Form(min_length=1, max_length=120)],
+    password: Annotated[str, Form(min_length=1, max_length=1024)],
+    csrf_token: Annotated[str, Form(min_length=1, max_length=120)],
+) -> Response:
+    csrf_cookie = request.cookies.get("items_login_csrf", "")
+    if not csrf_cookie or not hmac.compare_digest(csrf_cookie, csrf_token):
+        return login_form_response(error="Your sign-in form expired. Please try again.", response_status=403)
+
+    users = configured_users()
+    if not users:
+        return login_form_response(
+            error="Administration is disabled until an administrator account is configured.",
+            response_status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    encoded_password = users.get(username, "")
+    if not encoded_password or not verify_password(password, encoded_password):
+        dummy_hash = hash_password("invalid-user-placeholder", salt=b"items-for-sale")
+        verify_password(password, dummy_hash)
+        return login_form_response(error="Username or password is incorrect.", response_status=401)
+
+    token = create_session_token(username)
+    response = RedirectResponse(url="/manage", status_code=status.HTTP_303_SEE_OTHER)
+    response.delete_cookie("items_login_csrf", path="/login", samesite="strict")
+    response.set_cookie(
+        SESSION_COOKIE,
+        token,
+        max_age=SESSION_TTL_SECONDS,
+        path="/",
+        secure=os.environ.get("APP_ENV", "development").lower() == "production",
+        httponly=True,
+        samesite="strict",
+    )
+    return response
+
+
+@app.post("/logout")
+def logout(request: Request, _: Annotated[str, Depends(require_admin)]) -> Response:
+    revoke_session(request.cookies.get(SESSION_COOKIE))
+    response = RedirectResponse(url="/login", status_code=status.HTTP_303_SEE_OTHER)
+    response.delete_cookie(
+        SESSION_COOKIE,
+        path="/",
+        secure=os.environ.get("APP_ENV", "development").lower() == "production",
+        httponly=True,
+        samesite="strict",
+    )
+    return response
 
 
 @app.get("/health")
@@ -858,4 +950,3 @@ def delete_photo(photo_id: str, _: Annotated[str, Depends(require_admin)]) -> Re
         connection.execute("DELETE FROM item_photos WHERE id = ?", (photo_id,))
         (UPLOAD_DIR / row["filename"]).unlink(missing_ok=True)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
-
