@@ -1,0 +1,698 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f5f6f8">
+  <title>Inventory workspace</title>
+  <style>
+    :root {
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: #20252d;
+      background: #f5f6f8;
+      font-synthesis: none;
+      text-rendering: optimizeLegibility;
+      --ink: #20252d;
+      --muted: #737b87;
+      --line: #e7e9ed;
+      --paper: #fff;
+      --accent: #41644a;
+      --accent-dark: #31543a;
+      --soft-green: #eaf1eb;
+      --shadow: 0 12px 32px rgb(30 38 32 / 5%);
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-width: 320px; }
+    button, input, select, textarea { font: inherit; }
+    button, a { -webkit-tap-highlight-color: transparent; }
+    button { cursor: pointer; }
+    .shell { min-height: 100vh; }
+    .topbar {
+      height: 72px; display: flex; align-items: center; justify-content: space-between;
+      padding: 0 34px; border-bottom: 1px solid var(--line); background: var(--paper);
+      position: sticky; top: 0; z-index: 5;
+    }
+    .brand { display: flex; align-items: center; gap: 12px; font-weight: 720; letter-spacing: -.03em; }
+    .brand-mark {
+      width: 36px; height: 36px; border-radius: 11px; display: grid; place-items: center;
+      color: white; background: var(--accent); font-size: 17px;
+    }
+    .brand small { display: block; color: var(--muted); font-size: 11px; font-weight: 550; letter-spacing: .02em; margin-top: 2px; }
+    .top-actions { display: flex; gap: 10px; align-items: center; }
+    .online { display: inline-flex; gap: 7px; align-items: center; color: #52645a; font-size: 12px; margin-right: 10px; }
+    .online::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #54a36b; }
+    .layout { display: grid; grid-template-columns: 226px minmax(0, 1fr); max-width: 1540px; margin: 0 auto; }
+    aside { min-height: calc(100vh - 72px); padding: 26px 16px; border-right: 1px solid var(--line); background: #fafbfc; }
+    .nav-label { color: #9aa0a9; font-size: 10px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; padding: 8px 12px; }
+    .nav-list { display: grid; gap: 5px; margin: 4px 0 24px; }
+    .nav-button {
+      width: 100%; text-align: left; display: flex; align-items: center; gap: 12px;
+      border: 0; border-radius: 9px; padding: 11px 12px; color: #68717c; background: transparent;
+      font-size: 13px; font-weight: 590;
+    }
+    .nav-button:hover { background: #f0f2f3; color: var(--ink); }
+    .nav-button[aria-current="page"] { color: var(--accent-dark); background: var(--soft-green); }
+    .nav-icon { width: 18px; text-align: center; font-size: 16px; }
+    .aside-note { margin: 30px 5px 0; padding: 14px; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); font-size: 11px; line-height: 1.6; background: white; }
+    .aside-note strong { color: #515b65; }
+    main { min-width: 0; padding: 34px clamp(20px, 4vw, 56px) 60px; }
+    .page-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin-bottom: 28px; }
+    .eyebrow { color: var(--accent); text-transform: uppercase; font-size: 10px; font-weight: 760; letter-spacing: .12em; margin: 0 0 8px; }
+    h1 { margin: 0; font-size: clamp(26px, 3vw, 34px); letter-spacing: -.045em; line-height: 1.1; }
+    .subheading { margin: 8px 0 0; color: var(--muted); font-size: 13px; }
+    .button {
+      display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 40px;
+      padding: 0 15px; border-radius: 8px; border: 1px solid #dfe3e5; color: #48525c; background: white;
+      font-size: 12px; font-weight: 650; text-decoration: none; transition: background .15s, transform .15s;
+    }
+    .button:hover { background: #f7f8f8; }
+    .button:active { transform: translateY(1px); }
+    .button-primary { border-color: var(--accent); color: white; background: var(--accent); }
+    .button-primary:hover { border-color: var(--accent-dark); background: var(--accent-dark); }
+    .button-danger { color: #a63f39; border-color: #f0d6d3; }
+    .button-small { min-height: 32px; padding: 0 10px; font-size: 11px; }
+    .button-icon { width: 34px; min-height: 34px; padding: 0; }
+    .notice { display: none; position: sticky; top: 84px; z-index: 4; margin: -12px 0 18px; padding: 11px 14px; border-radius: 8px; font-size: 12px; box-shadow: var(--shadow); }
+    .notice.show { display: block; }
+    .notice.success { color: #31543a; background: #eaf1eb; border: 1px solid #cfdfd1; }
+    .notice.error { color: #963d36; background: #fff0ee; border: 1px solid #f0d2ce; }
+    .metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-bottom: 24px; }
+    .metric, .panel { background: var(--paper); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); }
+    .metric { padding: 18px 20px; }
+    .metric-label { color: var(--muted); font-size: 11px; font-weight: 570; }
+    .metric-value { display: block; margin-top: 9px; font-size: 26px; font-weight: 720; letter-spacing: -.045em; }
+    .metric-foot { color: #9a9fa7; font-size: 10px; margin-top: 4px; }
+    .content-grid { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(280px, .8fr); align-items: start; gap: 18px; }
+    .panel { overflow: hidden; }
+    .panel + .panel { margin-top: 18px; }
+    .panel-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 18px 20px; border-bottom: 1px solid var(--line); }
+    .panel-title { margin: 0; font-size: 14px; font-weight: 700; letter-spacing: -.015em; }
+    .panel-description { color: var(--muted); font-size: 11px; margin: 5px 0 0; }
+    .panel-body { padding: 18px 20px; }
+    .toolbar { display: flex; gap: 9px; margin: 0 0 14px; }
+    .control { width: 100%; min-width: 0; min-height: 38px; padding: 0 11px; color: #303943; background: white; border: 1px solid #e2e5e8; border-radius: 7px; outline: none; font-size: 12px; }
+    .control:focus { border-color: #91ad97; box-shadow: 0 0 0 3px rgb(65 100 74 / 10%); }
+    textarea.control { padding: 10px 11px; resize: vertical; }
+    .toolbar .control:first-child { flex: 1.6; }
+    .toolbar .control:not(:first-child) { flex: 1; }
+    .table-wrap { width: 100%; overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 11px; white-space: nowrap; }
+    th { padding: 10px 9px; color: #9299a2; background: #fafbfc; font-size: 9px; text-align: left; text-transform: uppercase; letter-spacing: .08em; font-weight: 700; }
+    td { padding: 12px 9px; border-top: 1px solid #f0f1f3; color: #636d78; }
+    tbody tr:hover { background: #fbfcfb; }
+    .item-name { color: #27312b; font-weight: 650; }
+    .item-meta { color: #9aa0a6; font-size: 10px; margin-top: 4px; }
+    .badge { display: inline-flex; align-items: center; min-height: 22px; padding: 0 8px; border-radius: 99px; color: #56646f; background: #f0f2f4; font-size: 10px; font-weight: 630; }
+    .badge-green { color: #386346; background: #eaf3ec; }
+    .badge-amber { color: #8b6725; background: #faf2df; }
+    .badge-gray { color: #747b83; background: #eff0f2; }
+    .row-actions { display: flex; gap: 5px; }
+    .empty { padding: 34px 16px; text-align: center; color: #9098a1; font-size: 12px; }
+    .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 12px; }
+    .field { display: grid; align-content: start; gap: 6px; margin: 0 0 12px; color: #69727d; font-size: 10px; font-weight: 620; }
+    .field-wide { grid-column: 1 / -1; }
+    .field-check { display: flex; align-items: center; gap: 8px; min-height: 34px; color: #5e6872; font-weight: 530; }
+    .field-check input { accent-color: var(--accent); }
+    .form-actions { display: flex; gap: 8px; padding-top: 4px; }
+    .selection-hint { color: #9098a1; font-size: 10px; margin: 0 0 12px; }
+    .photo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 9px; margin-top: 12px; }
+    .photo-card { min-width: 0; padding: 8px; border: 1px solid var(--line); border-radius: 9px; background: #fafbfc; }
+    .photo-card img { display: block; width: 100%; height: 94px; object-fit: cover; border-radius: 6px; background: #f0f1f3; }
+    .photo-card p { margin: 7px 0; color: #69727d; font-size: 10px; }
+    .photo-card .button { margin: 2px 3px 2px 0; }
+    .section { display: none; }
+    .section.active { display: block; }
+    .section-tabs { display: flex; flex-wrap: wrap; gap: 5px; }
+    .event-card, .category-card { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; padding: 13px 0; border-bottom: 1px solid #eef0f2; }
+    .event-card:last-child, .category-card:last-child { border-bottom: 0; }
+    .event-card h3 { margin: 0; font-size: 12px; }
+    .event-card p { color: var(--muted); font-size: 10px; line-height: 1.6; margin: 5px 0 0; }
+    .event-status { margin-top: 5px; }
+    .event-form { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+    .category-name { color: #39434c; font-size: 12px; font-weight: 620; }
+    .helper { padding: 12px; border-radius: 8px; color: #67746a; background: #f1f5f1; font-size: 10px; line-height: 1.6; }
+    @media (max-width: 1050px) {
+      .layout { grid-template-columns: 190px minmax(0, 1fr); }
+      .content-grid { grid-template-columns: minmax(0, 1fr); }
+      .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 700px) {
+      .topbar { height: 62px; padding: 0 15px; }
+      .online { display: none; }
+      .layout { display: block; }
+      aside { min-height: 0; padding: 8px 12px; border-right: 0; border-bottom: 1px solid var(--line); overflow-x: auto; }
+      .nav-label, .aside-note { display: none; }
+      .nav-list { display: flex; width: max-content; gap: 5px; margin: 0; }
+      .nav-button { width: auto; min-height: 40px; padding: 0 12px; }
+      main { padding: 24px 14px 44px; }
+      .page-heading { align-items: center; margin-bottom: 19px; }
+      .page-heading .button { min-height: 38px; padding: 0 10px; }
+      .metrics { gap: 9px; margin-bottom: 15px; }
+      .metric { padding: 13px; }
+      .metric-value { font-size: 22px; }
+      .panel-head { padding: 15px; }
+      .panel-body { padding: 14px; }
+      .toolbar { flex-wrap: wrap; }
+      .toolbar .control:first-child { flex-basis: 100%; }
+      .form-grid { grid-template-columns: minmax(0, 1fr); gap: 0; }
+      .field-wide { grid-column: auto; }
+    }
+    @media (max-width: 390px) {
+      .brand small { display: none; }
+      .top-actions .button { font-size: 10px; }
+      .page-heading .subheading { max-width: 210px; line-height: 1.45; }
+      .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark">S</span><span>Stockroom<small>ITEMS FOR SALE</small></span></div>
+      <div class="top-actions"><span class="online">Private workspace</span><a class="button" href="/" target="_blank" rel="noreferrer">View public catalog <span aria-hidden="true">↗</span></a></div>
+    </header>
+    <div class="layout">
+      <aside>
+        <div class="nav-label">Workspace</div>
+        <nav class="nav-list" aria-label="Admin sections">
+          <button class="nav-button" data-view="overview" aria-current="page"><span class="nav-icon">⌂</span>Overview</button>
+          <button class="nav-button" data-view="inventory"><span class="nav-icon">▤</span>Inventory <span class="badge" id="nav-inventory-count">0</span></button>
+          <button class="nav-button" data-view="events"><span class="nav-icon">▦</span>Sale events</button>
+          <button class="nav-button" data-view="categories"><span class="nav-icon">◇</span>Categories</button>
+        </nav>
+        <div class="nav-label">Quick note</div>
+        <div class="aside-note"><strong>Private by default</strong><br>Room, shelf and bin locations, private notes, and package/barcode photos stay out of the public catalog.</div>
+      </aside>
+      <main>
+        <div class="notice" id="notice" role="status" aria-live="polite"></div>
+        <section class="section active" id="view-overview">
+          <div class="page-heading">
+            <div><p class="eyebrow">Your workspace</p><h1>Good to see you.</h1><p class="subheading">A clear view of your sale inventory and what needs attention.</p></div>
+            <button class="button button-primary" type="button" data-go="inventory">＋ <span>Add an item</span></button>
+          </div>
+          <div class="metrics">
+            <article class="metric"><span class="metric-label">Total listings</span><strong class="metric-value" id="metric-total">—</strong><span class="metric-foot">Across your inventory</span></article>
+            <article class="metric"><span class="metric-label">Published</span><strong class="metric-value" id="metric-published">—</strong><span class="metric-foot">Visible in the public catalog</span></article>
+            <article class="metric"><span class="metric-label">Units available</span><strong class="metric-value" id="metric-units">—</strong><span class="metric-foot">Not reserved or sold</span></article>
+            <article class="metric"><span class="metric-label">Upcoming sale events</span><strong class="metric-value" id="metric-events">—</strong><span class="metric-foot">Dates on your calendar</span></article>
+          </div>
+          <div class="content-grid">
+            <section class="panel">
+              <div class="panel-head"><div><h2 class="panel-title">Recently updated</h2><p class="panel-description">Your latest inventory changes</p></div><button class="button button-small" data-go="inventory">View inventory</button></div>
+              <div class="table-wrap"><table><thead><tr><th>Item</th><th>Condition</th><th>Available</th><th>Price</th><th>Status</th><th></th></tr></thead><tbody id="recent-items"></tbody></table></div>
+            </section>
+            <section class="panel">
+              <div class="panel-head"><div><h2 class="panel-title">Next garage sale</h2><p class="panel-description">Your next scheduled event</p></div><button class="button button-small" data-go="events">Manage</button></div>
+              <div class="panel-body" id="next-event"><div class="empty">No sale dates added yet.</div></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="section" id="view-inventory">
+          <div class="page-heading">
+            <div><p class="eyebrow">Stockroom</p><h1>Inventory</h1><p class="subheading">Keep each listing, its condition, and available units up to date.</p></div>
+            <button class="button button-primary" type="button" id="new-item-button">＋ <span>New item</span></button>
+          </div>
+          <div class="content-grid">
+            <section class="panel">
+              <div class="panel-head"><div><h2 class="panel-title">All items <span class="badge" id="item-count">0</span></h2><p class="panel-description">Drafts and private listings are shown only here.</p></div></div>
+              <div class="panel-body">
+                <div class="toolbar">
+                  <input class="control" id="item-search" type="search" placeholder="Search by item, brand, model..." aria-label="Search inventory">
+                  <select class="control" id="item-category-filter" aria-label="Filter by category"><option value="">All categories</option></select>
+                  <select class="control" id="item-status-filter" aria-label="Filter by status"><option value="">All statuses</option><option value="available">Available</option><option value="reserved">Reserved</option><option value="sold">Sold</option><option value="hidden">Hidden</option></select>
+                </div>
+                <div class="table-wrap"><table><thead><tr><th>Item</th><th>Category</th><th>Condition</th><th>Available</th><th>Price</th><th>Status</th><th>Actions</th></tr></thead><tbody id="items"></tbody></table><div class="empty" id="items-empty" hidden>No items match these filters.</div></div>
+              </div>
+            </section>
+            <div>
+              <section class="panel" id="item-editor-panel">
+                <div class="panel-head"><div><h2 class="panel-title" id="item-legend">Add an item</h2><p class="panel-description">Product details and sale price</p></div><button class="button button-icon" type="button" id="reset" aria-label="Clear form">×</button></div>
+                <div class="panel-body">
+                  <form id="item-form"><input type="hidden" id="item-id">
+                    <div class="form-grid">
+                      <label class="field field-wide">Item name<input class="control" required id="name" maxlength="200" placeholder="e.g. LED pendant light"></label>
+                      <label class="field">Category<select class="control" required id="category"></select></label>
+                      <label class="field">Condition<select class="control" id="condition"><option value="new_sealed">New/sealed</option><option value="open_box">Open box</option><option value="used_good">Used/good</option><option value="used_fair">Used/fair</option><option value="for_parts_untested">For parts/untested</option></select></label>
+                      <label class="field">Brand<input class="control" id="brand" maxlength="120" placeholder="Optional"></label>
+                      <label class="field">Model<input class="control" id="model" maxlength="120" placeholder="Optional"></label>
+                      <label class="field">Total units<input class="control" type="number" min="1" value="1" id="quantity"></label>
+                      <label class="field">Reserved<input class="control" type="number" min="0" value="0" id="reserved_quantity"></label>
+                      <label class="field">Sold<input class="control" type="number" min="0" value="0" id="sold_quantity"></label>
+                      <label class="field">Asking price<input class="control" type="number" min="0" step="0.01" value="0" id="asking_price"></label>
+                      <label class="field">Listing status<select class="control" id="availability"><option value="available">Available</option><option value="reserved">Reserved</option><option value="sold">Sold</option><option value="hidden">Hidden</option></select></label>
+                      <label class="field field-wide">Barcode<input class="control" id="barcode" maxlength="80" placeholder="Optional"></label>
+                      <label class="field field-wide">Description<textarea class="control" id="description" rows="3" maxlength="3000" placeholder="Details buyers should know"></textarea></label>
+                      <label class="field field-wide">Storage location <span class="badge badge-gray">Private</span><input class="control" id="storage_location" maxlength="500" placeholder="Room / shelf / bin"></label>
+                      <label class="field field-wide">Private notes<textarea class="control" id="private_notes" rows="2" maxlength="5000" placeholder="Notes for you and your helpers"></textarea></label>
+                      <label class="field-check field-wide"><input type="checkbox" id="is_published"> Publish this listing in the public catalog</label>
+                    </div>
+                    <div class="form-actions"><button class="button button-primary" type="submit" id="save-item">Save item</button><button class="button" type="button" id="cancel-edit">Clear</button></div>
+                  </form>
+                </div>
+              </section>
+              <section class="panel" id="photo-panel">
+                <div class="panel-head"><div><h2 class="panel-title">Item photos</h2><p class="panel-description" id="photo-item-name">Select an item to manage photos</p></div></div>
+                <div class="panel-body">
+                  <form id="photo-form">
+                    <label class="field">Choose photo<input class="control" type="file" id="photo-file" accept="image/jpeg,image/png,image/webp" required></label>
+                    <div class="form-grid">
+                      <label class="field">Photo type<select class="control" id="photo-kind"><option value="product">Product photo</option><option value="package">Package photo</option><option value="barcode">Barcode photo</option></select></label>
+                      <label class="field-check"><input type="checkbox" id="photo-public"> Public product photo</label>
+                    </div>
+                    <p class="selection-hint">Package and barcode photos stay private. Images must be JPEG, PNG, or WebP under 10 MB.</p>
+                    <button class="button" type="submit" id="upload-photo">Upload photo</button>
+                  </form>
+                  <div class="photo-grid" id="photo-gallery"></div>
+                </div>
+              </section>
+            </div>
+          </div>
+        </section>
+
+        <section class="section" id="view-events">
+          <div class="page-heading"><div><p class="eyebrow">Meet your buyers</p><h1>Sale events</h1><p class="subheading">Share the dates and reveal your address only while each event is active.</p></div></div>
+          <div class="content-grid">
+            <section class="panel"><div class="panel-head"><div><h2 class="panel-title">Scheduled events</h2><p class="panel-description">Expired events are kept privately but no longer shown to buyers.</p></div></div><div class="panel-body" id="events"><div class="empty">Loading events…</div></div></section>
+            <section class="panel"><div class="panel-head"><div><h2 class="panel-title">Add an event</h2><p class="panel-description">Dates use your device's local time.</p></div></div><div class="panel-body">
+              <form id="event-form"><div class="form-grid">
+                <label class="field field-wide">Event name<input class="control" required id="event-title" placeholder="Saturday garage sale"></label>
+                <label class="field">Starts<input class="control" required type="datetime-local" id="event-start"></label>
+                <label class="field">Ends<input class="control" required type="datetime-local" id="event-end"></label>
+                <label class="field field-wide">Public address<input class="control" required id="event-address" placeholder="Shown only during event dates"></label>
+                <label class="field">Text number<input class="control" id="event-phone" type="tel" maxlength="40"></label>
+                <label class="field">Email<input class="control" id="event-email" type="email" maxlength="254"></label>
+              </div><p class="selection-hint">The public page shows the exact address only between the start and end times above.</p><button class="button button-primary" type="submit">Add event</button></form>
+            </div></section>
+          </div>
+        </section>
+
+        <section class="section" id="view-categories">
+          <div class="page-heading"><div><p class="eyebrow">Organize inventory</p><h1>Categories</h1><p class="subheading">Use a consistent category list for inventory and public filters.</p></div></div>
+          <div class="content-grid">
+            <section class="panel"><div class="panel-head"><div><h2 class="panel-title">Your categories</h2><p class="panel-description">Categories currently available when adding an item.</p></div></div><div class="panel-body" id="category-list"><div class="empty">Loading categories…</div></div></section>
+            <section class="panel"><div class="panel-head"><div><h2 class="panel-title">Add a category</h2><p class="panel-description">Keep names simple so buyers can filter quickly.</p></div></div><div class="panel-body">
+              <form id="category-form"><label class="field">Category name<input class="control" required id="new-category" maxlength="80" placeholder="e.g. Lighting"></label><button class="button button-primary" type="submit">Add category</button></form>
+              <p class="helper" style="margin-top:16px">Categories cannot be removed or renamed in this version. Keep names consistent so buyer filters stay clear.</p>
+            </div></section>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const ui = { items: [], categories: [], events: [], selectedItem: null, noticeTimer: null };
+    const fieldNames = ["name", "category", "brand", "model", "barcode", "condition", "quantity", "reserved_quantity", "sold_quantity", "asking_price", "availability", "storage_location", "description", "private_notes", "is_published"];
+
+    async function api(url, options = {}) {
+      const headers = { ...(options.body instanceof FormData ? {} : { "Content-Type": "application/json" }), ...(options.headers || {}) };
+      const response = await fetch(url, { ...options, headers });
+      if (!response.ok) {
+        let detail = response.statusText;
+        try { detail = (await response.json()).detail || detail; } catch {}
+        throw new Error(detail);
+      }
+      return response.status === 204 ? null : response.json();
+    }
+
+    function notify(text, error = false) {
+      const notice = $("notice");
+      notice.textContent = text;
+      notice.className = `notice show ${error ? "error" : "success"}`;
+      window.clearTimeout(ui.noticeTimer);
+      ui.noticeTimer = window.setTimeout(() => notice.classList.remove("show"), 5000);
+    }
+
+    function showView(name) {
+      document.querySelectorAll(".section").forEach((section) => section.classList.toggle("active", section.id === `view-${name}`));
+      document.querySelectorAll(".nav-button").forEach((button) => {
+        if (button.dataset.view === name) button.setAttribute("aria-current", "page");
+        else button.removeAttribute("aria-current");
+      });
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+
+    function makeCell(value, className = "") {
+      const cell = document.createElement("td");
+      cell.textContent = value;
+      if (className) cell.className = className;
+      return cell;
+    }
+
+    function statusBadge(item) {
+      const badge = document.createElement("span");
+      badge.className = `badge ${item.availability === "available" ? "badge-green" : item.availability === "reserved" ? "badge-amber" : "badge-gray"}`;
+      badge.textContent = item.availability_label + (item.is_published ? "" : " · Draft");
+      return badge;
+    }
+
+    function appendAction(cell, label, handler, className = "") {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = `button button-small ${className}`.trim();
+      button.textContent = label;
+      button.addEventListener("click", handler);
+      cell.appendChild(button);
+    }
+
+    function filteredItems() {
+      const query = $("item-search").value.trim().toLowerCase();
+      const category = $("item-category-filter").value;
+      const status = $("item-status-filter").value;
+      return ui.items.filter((item) => {
+        const searchText = [item.name, item.brand, item.model, item.barcode, item.category, item.description, item.storage_location].join(" ").toLowerCase();
+        return (!query || searchText.includes(query)) && (!category || item.category === category) && (!status || item.availability === status);
+      });
+    }
+
+    function renderItems() {
+      const filtered = filteredItems();
+      $("item-count").textContent = `${filtered.length} / ${ui.items.length}`;
+      $("items-empty").hidden = filtered.length !== 0;
+      const body = $("items");
+      body.replaceChildren();
+      filtered.forEach((item) => {
+        const row = document.createElement("tr");
+        const name = document.createElement("td");
+        const title = document.createElement("div");
+        title.textContent = item.name;
+        title.className = "item-name";
+        name.appendChild(title);
+        const meta = document.createElement("div");
+        meta.className = "item-meta";
+        meta.textContent = [item.brand, item.model].filter(Boolean).join(" · ") || "No brand or model";
+        name.appendChild(meta);
+        row.append(name, makeCell(item.category), makeCell(item.condition_label), makeCell(`${item.available_quantity} / ${item.quantity}`), makeCell(`$${item.asking_price.toFixed(2)}`));
+        const status = document.createElement("td");
+        status.appendChild(statusBadge(item));
+        row.appendChild(status);
+        const actions = document.createElement("td");
+        const actionGroup = document.createElement("div");
+        actionGroup.className = "row-actions";
+        appendAction(actionGroup, "Edit", () => editItem(item));
+        appendAction(actionGroup, `Photos${item.photos.length ? ` (${item.photos.length})` : ""}`, () => showPhotos(item));
+        actions.appendChild(actionGroup);
+        row.appendChild(actions);
+        body.appendChild(row);
+      });
+      $("nav-inventory-count").textContent = ui.items.length;
+      $("metric-total").textContent = ui.items.length;
+      $("metric-published").textContent = ui.items.filter((item) => item.is_published && ["available", "reserved"].includes(item.availability)).length;
+      $("metric-units").textContent = ui.items.reduce((sum, item) => sum + item.available_quantity, 0);
+      renderRecent();
+    }
+
+    function renderRecent() {
+      const body = $("recent-items");
+      body.replaceChildren();
+      const recent = [...ui.items].sort((a, b) => b.updated_at.localeCompare(a.updated_at)).slice(0, 5);
+      if (!recent.length) {
+        const row = document.createElement("tr");
+        const cell = document.createElement("td");
+        cell.colSpan = 6;
+        cell.className = "empty";
+        cell.textContent = "Your inventory is ready when you are. Add your first item to get started.";
+        row.appendChild(cell);
+        body.appendChild(row);
+        return;
+      }
+      recent.forEach((item) => {
+        const row = document.createElement("tr");
+        row.append(makeCell(item.name, "item-name"), makeCell(item.condition_label), makeCell(`${item.available_quantity} / ${item.quantity}`), makeCell(`$${item.asking_price.toFixed(2)}`));
+        const state = document.createElement("td");
+        state.appendChild(statusBadge(item));
+        row.append(state);
+        const action = document.createElement("td");
+        appendAction(action, "Edit", () => { showView("inventory"); editItem(item); });
+        row.append(action);
+        body.appendChild(row);
+      });
+    }
+
+    function renderCategoryOptions() {
+      const current = $("category").value;
+      $("category").replaceChildren();
+      ui.categories.forEach((name) => {
+        const option = document.createElement("option");
+        option.value = name;
+        option.textContent = name;
+        $("category").appendChild(option);
+      });
+      if (ui.categories.includes(current)) $("category").value = current;
+      const filter = $("item-category-filter");
+      const selected = filter.value;
+      filter.replaceChildren(new Option("All categories", ""));
+      ui.categories.forEach((name) => filter.appendChild(new Option(name, name)));
+      if (ui.categories.includes(selected)) filter.value = selected;
+
+      const list = $("category-list");
+      list.replaceChildren();
+      if (!ui.categories.length) {
+        list.innerHTML = '<div class="empty">No categories yet. Add one to classify inventory.</div>';
+        return;
+      }
+      ui.categories.forEach((name) => {
+        const row = document.createElement("div");
+        row.className = "category-card";
+        const title = document.createElement("span");
+        title.className = "category-name";
+        title.textContent = name;
+        const count = ui.items.filter((item) => item.category === name).length;
+        const badge = document.createElement("span");
+        badge.className = "badge";
+        badge.textContent = `${count} ${count === 1 ? "item" : "items"}`;
+        row.append(title, badge);
+        list.appendChild(row);
+      });
+    }
+
+    function formatDate(value) {
+      return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
+    }
+
+    function renderEvents() {
+      const container = $("events");
+      container.replaceChildren();
+      const now = Date.now();
+      const upcoming = ui.events.filter((event) => new Date(event.ends_at).getTime() >= now).sort((a, b) => a.starts_at.localeCompare(b.starts_at));
+      $("metric-events").textContent = upcoming.length;
+      const next = upcoming[0];
+      const nextPanel = $("next-event");
+      nextPanel.replaceChildren();
+      if (next) {
+        const title = document.createElement("h3");
+        title.textContent = next.title;
+        const date = document.createElement("p");
+        date.textContent = `${formatDate(next.starts_at)} – ${formatDate(next.ends_at)}`;
+        const address = document.createElement("p");
+        address.textContent = next.address;
+        nextPanel.append(title, date, address);
+      } else {
+        const empty = document.createElement("div");
+        empty.className = "empty";
+        empty.textContent = "No sale dates added yet.";
+        nextPanel.appendChild(empty);
+      }
+      if (!upcoming.length) {
+        const empty = document.createElement("div");
+        empty.className = "empty";
+        empty.textContent = "No upcoming garage-sale events. Add dates to help buyers plan a visit.";
+        container.appendChild(empty);
+      }
+      ui.events.forEach((event) => {
+        const card = document.createElement("article");
+        card.className = "event-card";
+        const content = document.createElement("div");
+        const title = document.createElement("h3");
+        title.textContent = event.title;
+        const dates = document.createElement("p");
+        dates.textContent = `${formatDate(event.starts_at)} – ${formatDate(event.ends_at)}`;
+        const address = document.createElement("p");
+        address.textContent = event.address;
+        const contact = document.createElement("p");
+        contact.textContent = [event.contact_phone, event.contact_email].filter(Boolean).join(" · ") || "No buyer contact configured";
+        const state = document.createElement("span");
+        state.className = `badge event-status ${new Date(event.starts_at) <= new Date() && new Date(event.ends_at) >= new Date() ? "badge-green" : "badge-gray"}`;
+        state.textContent = new Date(event.starts_at) <= new Date() && new Date(event.ends_at) >= new Date() ? "Active · address public" : new Date(event.ends_at) < new Date() ? "Ended · address private" : "Upcoming";
+        content.append(title, dates, address, contact, state);
+        appendAction(card, "Delete", () => deleteEvent(event), "button-danger");
+        card.appendChild(content);
+        container.appendChild(card);
+      });
+    }
+
+    async function refreshData() {
+      const [items, categories, events] = await Promise.all([
+        api("/api/admin/items"), api("/api/admin/categories"), api("/api/admin/events"),
+      ]);
+      ui.items = items;
+      ui.categories = categories;
+      ui.events = events;
+      renderCategoryOptions();
+      renderItems();
+      renderEvents();
+    }
+
+    function resetItemForm() {
+      $("item-form").reset();
+      $("item-id").value = "";
+      $("item-legend").textContent = "Add an item";
+      $("quantity").value = 1;
+      $("reserved_quantity").value = 0;
+      $("sold_quantity").value = 0;
+      $("asking_price").value = 0;
+      if (ui.categories.length) $("category").value = ui.categories[0];
+      $("save-item").textContent = "Save item";
+    }
+
+    function editItem(item) {
+      $("item-id").value = item.id;
+      fieldNames.forEach((name) => {
+        if ($(name).type === "checkbox") $(name).checked = item[name];
+        else $(name).value = item[name] ?? "";
+      });
+      $("item-legend").textContent = "Edit item";
+      $("save-item").textContent = "Save changes";
+      showView("inventory");
+      $("item-editor-panel").scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+
+    async function showPhotos(item) {
+      ui.selectedItem = item;
+      $("photo-item-name").textContent = item.name;
+      $("photo-form").dataset.itemId = item.id;
+      const gallery = $("photo-gallery");
+      gallery.replaceChildren();
+      if (!item.photos.length) {
+        const empty = document.createElement("div");
+        empty.className = "empty";
+        empty.textContent = "No photos yet. Upload product, package, or barcode photos here.";
+        gallery.appendChild(empty);
+      }
+      item.photos.forEach((photo) => {
+        const card = document.createElement("article");
+        card.className = "photo-card";
+        const image = document.createElement("img");
+        image.src = `/api/admin/photos/${encodeURIComponent(photo.id)}`;
+        image.alt = `${photo.kind} photo for ${item.name}`;
+        image.loading = "lazy";
+        const caption = document.createElement("p");
+        caption.textContent = `${photo.kind} · ${photo.is_public ? "Public" : "Private"}`;
+        card.append(image, caption);
+        if (photo.kind === "product") appendAction(card, photo.is_public ? "Make private" : "Publish", async () => {
+          try {
+            await api(`/api/admin/photos/${encodeURIComponent(photo.id)}?is_public=${!photo.is_public}`, { method: "PATCH" });
+            await refreshData();
+            await showPhotos(ui.items.find((record) => record.id === item.id));
+            notify("Photo visibility updated.");
+          } catch (error) { notify(error.message, true); }
+        });
+        appendAction(card, "Delete", async () => {
+          if (!window.confirm("Delete this photo? This cannot be undone.")) return;
+          try {
+            await api(`/api/admin/photos/${encodeURIComponent(photo.id)}`, { method: "DELETE" });
+            await refreshData();
+            await showPhotos(ui.items.find((record) => record.id === item.id));
+            notify("Photo deleted.");
+          } catch (error) { notify(error.message, true); }
+        }, "button-danger");
+        gallery.appendChild(card);
+      });
+      $("photo-panel").scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+
+    async function deleteEvent(event) {
+      if (!window.confirm(`Delete "${event.title}"?`)) return;
+      try {
+        await api(`/api/admin/events/${encodeURIComponent(event.id)}`, { method: "DELETE" });
+        await refreshData();
+        notify("Sale event deleted.");
+      } catch (error) { notify(error.message, true); }
+    }
+
+    document.querySelectorAll(".nav-button").forEach((button) => button.addEventListener("click", () => showView(button.dataset.view)));
+    document.querySelectorAll("[data-go]").forEach((button) => button.addEventListener("click", () => showView(button.dataset.go)));
+    $("new-item-button").addEventListener("click", () => { resetItemForm(); $("item-editor-panel").scrollIntoView({ behavior: "smooth", block: "start" }); $("name").focus({ preventScroll: true }); });
+    $("cancel-edit").addEventListener("click", resetItemForm);
+    $("reset").addEventListener("click", resetItemForm);
+    $("item-search").addEventListener("input", renderItems);
+    $("item-category-filter").addEventListener("change", renderItems);
+    $("item-status-filter").addEventListener("change", renderItems);
+
+    $("item-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const item = {};
+      fieldNames.forEach((name) => {
+        if (["quantity", "reserved_quantity", "sold_quantity"].includes(name)) item[name] = Number($(name).value);
+        else if (name === "asking_price") item[name] = Number($(name).value);
+        else if (name === "is_published") item[name] = $(name).checked;
+        else item[name] = $(name).value;
+      });
+      const id = $("item-id").value;
+      $("save-item").disabled = true;
+      try {
+        await api(id ? `/api/admin/items/${encodeURIComponent(id)}` : "/api/admin/items", {
+          method: id ? "PATCH" : "POST", body: JSON.stringify(item),
+        });
+        await refreshData();
+        resetItemForm();
+        notify(id ? "Item changes saved." : "Item added to inventory.");
+      } catch (error) { notify(error.message, true); }
+      finally { $("save-item").disabled = false; }
+    });
+
+    $("photo-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const itemId = $("photo-form").dataset.itemId;
+      if (!itemId) { notify("Save the item first, then select it from inventory to add photos.", true); return; }
+      const file = $("photo-file").files[0];
+      if (!file) { notify("Choose an image to upload.", true); return; }
+      if (file.size > 10 * 1024 * 1024) { notify("Images must be smaller than 10 MB.", true); return; }
+      const form = new FormData();
+      form.append("file", file);
+      form.append("kind", $("photo-kind").value);
+      form.append("is_public", String($("photo-public").checked));
+      try {
+        await api(`/api/admin/items/${encodeURIComponent(itemId)}/photos`, { method: "POST", body: form });
+        await refreshData();
+        $("photo-form").reset();
+        await showPhotos(ui.items.find((item) => item.id === itemId));
+        notify("Photo uploaded.");
+      } catch (error) { notify(error.message, true); }
+    });
+
+    $("category-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        await api("/api/admin/categories", { method: "POST", body: JSON.stringify({ name: $("new-category").value }) });
+        $("category-form").reset();
+        await refreshData();
+        notify("Category added.");
+      } catch (error) { notify(error.message, true); }
+    });
+
+    function localDateTimeToIso(value) { return new Date(value).toISOString(); }
+    $("event-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const start = $("event-start").value;
+      const end = $("event-end").value;
+      if (!start || !end || new Date(end) <= new Date(start)) { notify("The event end must be after its start.", true); return; }
+      const button = $("event-form").querySelector('button[type="submit"]');
+      button.disabled = true;
+      try {
+        await api("/api/admin/events", { method: "POST", body: JSON.stringify({
+          title: $("event-title").value, starts_at: localDateTimeToIso(start), ends_at: localDateTimeToIso(end),
+          address: $("event-address").value, contact_phone: $("event-phone").value, contact_email: $("event-email").value,
+        }) });
+        $("event-form").reset();
+        await refreshData();
+        notify("Garage-sale event added.");
+      } catch (error) { notify(error.message, true); }
+      finally { button.disabled = false; }
+    });
+
+    refreshData().catch((error) => notify(`Could not load your workspace: ${error.message}`, true));
+  </script>
+</body>
+</html>
