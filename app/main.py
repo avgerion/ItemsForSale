@@ -3,9 +3,13 @@ from __future__ import annotations
 import html
 import hmac
 import io
+import json
 import os
 import sqlite3
 import secrets
+import shutil
+import tempfile
+import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -28,11 +32,14 @@ from bokeh.models import (
 )
 from bokeh.resources import CDN
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, status
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from starlette.background import BackgroundTask
 
-from .database import UPLOAD_DIR, connect_db, initialize_database
+from .backups import configured_backup_directory, create_inventory_backup, save_server_backup
+from .database import INTAKE_UPLOAD_DIR, UPLOAD_DIR, connect_db, initialize_database, purge_expired_intakes
+from .providers import ProviderError, provider_statuses, run_provider
 from .security import (
     SESSION_COOKIE,
     SESSION_TTL_SECONDS,
@@ -71,6 +78,7 @@ class ItemCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     brand: str = Field(default="", max_length=120)
     model: str = Field(default="", max_length=120)
+    manufacturer_part_number: str = Field(default="", max_length=120)
     barcode: str = Field(default="", max_length=80)
     category: str = Field(min_length=1, max_length=80)
     description: str = Field(default="", max_length=3000)
@@ -99,6 +107,7 @@ class ItemUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     brand: str | None = Field(default=None, max_length=120)
     model: str | None = Field(default=None, max_length=120)
+    manufacturer_part_number: str | None = Field(default=None, max_length=120)
     barcode: str | None = Field(default=None, max_length=80)
     category: str | None = Field(default=None, min_length=1, max_length=80)
     description: str | None = Field(default=None, max_length=3000)
@@ -111,6 +120,39 @@ class ItemUpdate(BaseModel):
     private_notes: str | None = Field(default=None, max_length=5000)
     storage_location: str | None = Field(default=None, max_length=500)
     is_published: bool | None = None
+
+
+class IntakeCreate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    barcode: str = Field(default="", max_length=80)
+    manufacturer_part_number: str = Field(default="", max_length=120)
+
+
+class IntakeUpdate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    barcode: str | None = Field(default=None, max_length=80)
+    manufacturer_part_number: str | None = Field(default=None, max_length=120)
+
+
+class IntakeLookup(BaseModel):
+    method: Literal[
+        "vision_gemini",
+        "vision_openai",
+        "vision_groqcloud",
+        "barcode_local",
+        "upcitemdb",
+        "upcdatabase",
+        "ebay_active",
+    ]
+    photo_ids: list[str] = Field(default_factory=list, max_length=8)
+
+
+class IntakeFinalize(BaseModel):
+    item: ItemCreate
+    selected_field_sources: dict[str, str] = Field(default_factory=dict)
+    selected_evidence_ids: list[str] = Field(default_factory=list)
 
 
 class CategoryCreate(BaseModel):
@@ -209,11 +251,72 @@ def item_record(row: sqlite3.Row, *, include_private: bool) -> dict:
         record.update(
             {
                 "barcode": row["barcode"],
+                "manufacturer_part_number": row["manufacturer_part_number"],
                 "private_notes": row["private_notes"],
                 "storage_location": row["storage_location"],
             }
         )
     return record
+
+
+def intake_record(connection: sqlite3.Connection, intake_id: str) -> dict:
+    intake = connection.execute(
+        """
+        SELECT id, barcode, manufacturer_part_number, created_at, expires_at
+        FROM assisted_intakes WHERE id = ? AND expires_at > ?
+        """,
+        (intake_id, int(time.time())),
+    ).fetchone()
+    if intake is None:
+        raise HTTPException(status_code=404, detail="Intake not found or expired")
+    photos = connection.execute(
+        """
+        SELECT id, kind, media_type, created_at
+        FROM assisted_intake_photos WHERE intake_id = ? ORDER BY created_at
+        """,
+        (intake_id,),
+    ).fetchall()
+    candidates = connection.execute(
+        """
+        SELECT id, source_name, source_type, fields_json, evidence_json, retrieved_at, is_fixture
+        FROM intake_candidates WHERE intake_id = ? ORDER BY source_name, id
+        """,
+        (intake_id,),
+    ).fetchall()
+    candidate_records = []
+    for candidate in candidates:
+        fields = json.loads(candidate["fields_json"])
+        match_notes = fields.pop("_match_notes", "")
+        candidate_records.append(
+            {
+                "id": candidate["id"],
+                "source_name": candidate["source_name"],
+                "source_type": candidate["source_type"],
+                "fields": fields,
+                "match_notes": match_notes,
+                "price_evidence": json.loads(candidate["evidence_json"]),
+                "retrieved_at": candidate["retrieved_at"],
+                "is_fixture": bool(candidate["is_fixture"]),
+            }
+        )
+    return {
+        "id": intake["id"],
+        "barcode": intake["barcode"],
+        "manufacturer_part_number": intake["manufacturer_part_number"],
+        "created_at": intake["created_at"],
+        "expires_at": intake["expires_at"],
+        "photos": [
+            {
+                "id": photo["id"],
+                "kind": photo["kind"],
+                "media_type": photo["media_type"],
+                "created_at": photo["created_at"],
+                "url": f"/api/admin/intakes/{intake_id}/photos/{photo['id']}",
+            }
+            for photo in photos
+        ],
+        "candidates": candidate_records,
+    }
 
 
 def fetch_item(connection: sqlite3.Connection, item_id: str) -> sqlite3.Row:
@@ -229,6 +332,51 @@ def fetch_item(connection: sqlite3.Connection, item_id: str) -> sqlite3.Row:
     if row is None:
         raise HTTPException(status_code=404, detail="Item not found")
     return row
+
+
+def insert_inventory_item(
+    connection: sqlite3.Connection,
+    item: ItemCreate,
+    *,
+    is_published: bool | None = None,
+) -> tuple[str, dict]:
+    now = timestamp()
+    item_id = str(uuid.uuid4())
+    cat_id = category_id(connection, item.category)
+    availability = normalize_availability(
+        item.availability, item.quantity, item.reserved_quantity, item.sold_quantity
+    )
+    connection.execute(
+        """
+        INSERT INTO items (
+            id, name, brand, model, manufacturer_part_number, barcode, category_id, description, condition,
+            quantity, reserved_quantity, sold_quantity, availability, asking_price_cents,
+            private_notes, storage_location, is_published, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            item_id,
+            item.name,
+            item.brand,
+            item.model,
+            item.manufacturer_part_number,
+            item.barcode,
+            cat_id,
+            item.description,
+            item.condition,
+            item.quantity,
+            item.reserved_quantity,
+            item.sold_quantity,
+            availability,
+            price_to_cents(item.asking_price),
+            item.private_notes,
+            item.storage_location,
+            int(item.is_published if is_published is None else is_published),
+            now,
+            now,
+        ),
+    )
+    return item_id, item_record(fetch_item(connection, item_id), include_private=True)
 
 
 def public_items(search: str = "", category: str = "") -> list[dict]:
@@ -634,6 +782,497 @@ def management_page(_: Annotated[str, Depends(require_admin)]) -> HTMLResponse:
     return HTMLResponse(template.read_text(encoding="utf-8"))
 
 
+@app.get("/api/admin/intakes")
+def list_intakes(_: Annotated[str, Depends(require_admin)]) -> list[dict]:
+    purge_expired_intakes()
+    with connect_db() as connection:
+        rows = connection.execute(
+            "SELECT id FROM assisted_intakes WHERE expires_at > ? ORDER BY created_at DESC",
+            (int(time.time()),),
+        ).fetchall()
+        return [intake_record(connection, row["id"]) for row in rows]
+
+
+@app.get("/api/admin/intake-providers")
+def list_intake_providers(_: Annotated[str, Depends(require_admin)]) -> list[dict[str, str | bool]]:
+    return provider_statuses()
+
+
+@app.get("/api/admin/backups/status")
+def backup_status(_: Annotated[str, Depends(require_admin)]) -> dict[str, str | bool]:
+    try:
+        backup_dir = configured_backup_directory()
+    except ValueError:
+        return {
+            "configured": True,
+            "available": False,
+            "detail": "The configured backup directory must be outside the database and photo directories.",
+        }
+    if backup_dir is None:
+        return {
+            "configured": False,
+            "available": False,
+            "detail": "Set INVENTORY_BACKUP_DIR to enable backups to a USB drive attached to this server.",
+        }
+    if not backup_dir.is_dir():
+        return {
+            "configured": True,
+            "available": False,
+            "detail": "The configured server backup directory is not mounted or available.",
+        }
+    if not os.access(backup_dir, os.W_OK):
+        return {
+            "configured": True,
+            "available": False,
+            "detail": "The configured server backup directory is not writable by the app.",
+        }
+    return {
+        "configured": True,
+        "available": True,
+        "detail": "Server backup directory is mounted and writable.",
+    }
+
+
+def _remove_temporary_backup(path: str) -> None:
+    Path(path).unlink(missing_ok=True)
+
+
+@app.get("/api/admin/backups/download")
+def download_backup(_: Annotated[str, Depends(require_admin)]) -> FileResponse:
+    file_descriptor, filename = tempfile.mkstemp(prefix="items-for-sale-backup-", suffix=".zip")
+    os.close(file_descriptor)
+    try:
+        create_inventory_backup(Path(filename))
+    except (OSError, sqlite3.Error) as exc:
+        _remove_temporary_backup(filename)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Could not create backup: {exc}",
+        ) from exc
+    download_name = f"items-for-sale-backup-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}.zip"
+    return FileResponse(
+        filename,
+        media_type="application/zip",
+        filename=download_name,
+        background=BackgroundTask(_remove_temporary_backup, filename),
+    )
+
+
+@app.post("/api/admin/backups/server")
+def create_server_backup(_: Annotated[str, Depends(require_admin)]) -> dict[str, str]:
+    try:
+        backup_dir = configured_backup_directory()
+        if backup_dir is None:
+            raise ValueError("Set INVENTORY_BACKUP_DIR before saving a backup to the server.")
+        destination = save_server_backup(backup_dir)
+    except (OSError, sqlite3.Error, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Could not save server backup: {exc}",
+        ) from exc
+    return {"filename": destination.name}
+
+
+@app.post("/api/admin/intakes", status_code=status.HTTP_201_CREATED)
+def create_intake(
+    intake: IntakeCreate,
+    _: Annotated[str, Depends(require_admin)],
+) -> dict:
+    purge_expired_intakes()
+    intake_id = str(uuid.uuid4())
+    created = utc_now()
+    expires = int(time.time()) + 48 * 60 * 60
+    with connect_db() as connection:
+        connection.execute(
+            """
+            INSERT INTO assisted_intakes(id, barcode, manufacturer_part_number, created_at, expires_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                intake_id,
+                intake.barcode,
+                intake.manufacturer_part_number,
+                timestamp(created),
+                expires,
+            ),
+        )
+        return intake_record(connection, intake_id)
+
+
+@app.get("/api/admin/intakes/{intake_id}")
+def get_intake(
+    intake_id: str,
+    _: Annotated[str, Depends(require_admin)],
+) -> dict:
+    purge_expired_intakes()
+    with connect_db() as connection:
+        return intake_record(connection, intake_id)
+
+
+@app.patch("/api/admin/intakes/{intake_id}")
+def update_intake(
+    intake_id: str,
+    update: IntakeUpdate,
+    _: Annotated[str, Depends(require_admin)],
+) -> dict:
+    purge_expired_intakes()
+    changes = update.model_dump(exclude_unset=True)
+    if not changes:
+        raise HTTPException(status_code=422, detail="Provide a barcode or manufacturer part number to update")
+    with connect_db() as connection:
+        existing = intake_record(connection, intake_id)
+        barcode = changes.get("barcode", existing["barcode"])
+        manufacturer_part_number = changes.get(
+            "manufacturer_part_number", existing["manufacturer_part_number"]
+        )
+        if barcode is None or manufacturer_part_number is None:
+            raise HTTPException(status_code=422, detail="Intake identifiers cannot be null")
+        connection.execute(
+            """
+            UPDATE assisted_intakes
+            SET barcode = ?, manufacturer_part_number = ?
+            WHERE id = ?
+            """,
+            (barcode, manufacturer_part_number, intake_id),
+        )
+        return intake_record(connection, intake_id)
+
+
+@app.delete("/api/admin/intakes/{intake_id}", status_code=status.HTTP_204_NO_CONTENT)
+def discard_intake(
+    intake_id: str,
+    _: Annotated[str, Depends(require_admin)],
+) -> Response:
+    purge_expired_intakes()
+    with connect_db() as connection:
+        photos = connection.execute(
+            "SELECT filename FROM assisted_intake_photos WHERE intake_id = ?",
+            (intake_id,),
+        ).fetchall()
+        result = connection.execute("DELETE FROM assisted_intakes WHERE id = ?", (intake_id,))
+        if result.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Intake not found")
+    for photo in photos:
+        (INTAKE_UPLOAD_DIR / photo["filename"]).unlink(missing_ok=True)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.post("/api/admin/intakes/{intake_id}/photos", status_code=status.HTTP_201_CREATED)
+async def upload_intake_photo(
+    intake_id: str,
+    _: Annotated[str, Depends(require_admin)],
+    file: Annotated[UploadFile, File()],
+    kind: Annotated[PhotoKind, Form()],
+) -> dict:
+    purge_expired_intakes()
+    payload = await read_valid_image(file)
+    INTAKE_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    photo_id = str(uuid.uuid4())
+    extension = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}[file.content_type]
+    filename = f"{photo_id}{extension}"
+    destination = INTAKE_UPLOAD_DIR / filename
+    with connect_db() as connection:
+        intake_record(connection, intake_id)
+        destination.write_bytes(payload)
+        try:
+            connection.execute(
+                """
+                INSERT INTO assisted_intake_photos(id, intake_id, kind, filename, media_type, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (photo_id, intake_id, kind, filename, file.content_type, timestamp()),
+            )
+        except Exception:
+            destination.unlink(missing_ok=True)
+            raise
+    return {
+        "id": photo_id,
+        "intake_id": intake_id,
+        "kind": kind,
+        "media_type": file.content_type,
+        "url": f"/api/admin/intakes/{intake_id}/photos/{photo_id}",
+    }
+
+
+@app.get("/api/admin/intakes/{intake_id}/photos/{photo_id}")
+def get_intake_photo(
+    intake_id: str,
+    photo_id: str,
+    _: Annotated[str, Depends(require_admin)],
+) -> Response:
+    purge_expired_intakes()
+    with connect_db() as connection:
+        photo = connection.execute(
+            """
+            SELECT filename, media_type FROM assisted_intake_photos
+            WHERE id = ? AND intake_id = ?
+            """,
+            (photo_id, intake_id),
+        ).fetchone()
+        if photo is None:
+            raise HTTPException(status_code=404, detail="Intake photo not found")
+    try:
+        content = (INTAKE_UPLOAD_DIR / photo["filename"]).read_bytes()
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Intake photo file not found") from exc
+    return Response(content, media_type=photo["media_type"], headers={"X-Content-Type-Options": "nosniff"})
+
+
+@app.post("/api/admin/intakes/{intake_id}/lookup")
+def lookup_intake(
+    intake_id: str,
+    _: Annotated[str, Depends(require_admin)],
+    request: IntakeLookup,
+) -> dict:
+    purge_expired_intakes()
+    retrieved_at = timestamp()
+    with connect_db() as connection:
+        intake = intake_record(connection, intake_id)
+        has_identifier = bool(intake["barcode"] or intake["manufacturer_part_number"])
+        if request.photo_ids and request.method not in {
+            "vision_gemini",
+            "vision_openai",
+            "vision_groqcloud",
+            "barcode_local",
+        }:
+            raise HTTPException(status_code=422, detail="This provider method does not accept photos.")
+        if request.method in {"vision_gemini", "vision_openai", "vision_groqcloud"} and not request.photo_ids:
+            raise HTTPException(status_code=422, detail="Select at least one photo before a vision run")
+        if request.method == "vision_groqcloud" and len(request.photo_ids) > 3:
+            raise HTTPException(status_code=422, detail="Select no more than 3 photos for a GroqCloud vision run")
+        if request.method in {"upcitemdb", "upcdatabase", "ebay_active"} and not has_identifier:
+            raise HTTPException(
+                status_code=422,
+                detail="Enter a barcode or manufacturer part number before this lookup",
+            )
+
+        selected_photos: list[tuple[str, bytes, str]] = []
+        if request.photo_ids:
+            if len(set(request.photo_ids)) != len(request.photo_ids):
+                raise HTTPException(status_code=422, detail="A photo can only be selected once per provider run")
+            placeholders = ",".join("?" for _ in request.photo_ids)
+            photo_rows = connection.execute(
+                f"""
+                SELECT id, kind, filename, media_type
+                FROM assisted_intake_photos
+                WHERE intake_id = ? AND id IN ({placeholders})
+                """,
+                [intake_id, *request.photo_ids],
+            ).fetchall()
+            if len(photo_rows) != len(request.photo_ids):
+                raise HTTPException(status_code=422, detail="A selected photo does not belong to this intake")
+            for photo in photo_rows:
+                try:
+                    photo_bytes = (INTAKE_UPLOAD_DIR / photo["filename"]).read_bytes()
+                except FileNotFoundError as exc:
+                    raise HTTPException(status_code=404, detail="A selected intake photo file is missing") from exc
+                selected_photos.append((photo["kind"], photo_bytes, photo["media_type"]))
+
+        try:
+            generated_candidates = run_provider(
+                request.method,
+                barcode=intake["barcode"],
+                manufacturer_part_number=intake["manufacturer_part_number"],
+                photos=selected_photos,
+            )
+        except ProviderError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        for candidate in generated_candidates:
+            candidate["id"] = str(uuid.uuid4())
+            connection.execute(
+                """
+                INSERT INTO intake_candidates(
+                    id, intake_id, source_name, source_type, fields_json, evidence_json, retrieved_at, is_fixture
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    candidate["id"],
+                    intake_id,
+                    candidate["source_name"],
+                    candidate["source_type"],
+                    json.dumps(
+                        {
+                            **candidate["fields"],
+                            **({"_match_notes": candidate["match_notes"]} if candidate.get("match_notes") else {}),
+                        }
+                    ),
+                    json.dumps(candidate["price_evidence"]),
+                    retrieved_at,
+                    0,
+                ),
+            )
+        return intake_record(connection, intake_id)
+
+
+@app.post("/api/admin/intakes/{intake_id}/create-draft", status_code=status.HTTP_201_CREATED)
+def create_draft_from_intake(
+    intake_id: str,
+    request: IntakeFinalize,
+    _: Annotated[str, Depends(require_admin)],
+) -> dict:
+    purge_expired_intakes()
+    allowed_fields = {
+        "name",
+        "brand",
+        "model",
+        "manufacturer_part_number",
+        "barcode",
+        "category",
+        "description",
+    }
+    if not set(request.selected_field_sources).issubset(allowed_fields):
+        raise HTTPException(status_code=422, detail="Unsupported field in selected sources")
+    if len(set(request.selected_evidence_ids)) != len(request.selected_evidence_ids):
+        raise HTTPException(status_code=422, detail="Price evidence may only be selected once")
+
+    copied_files: list[Path] = []
+    staged_files: list[Path] = []
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        with connect_db() as connection:
+            intake_record(connection, intake_id)
+            candidate_ids = set(request.selected_field_sources.values())
+            selected_candidates: dict[str, sqlite3.Row] = {}
+            for candidate_id in candidate_ids:
+                candidate = connection.execute(
+                    """
+                    SELECT id, source_name, source_type, fields_json, evidence_json, retrieved_at
+                    FROM intake_candidates WHERE id = ? AND intake_id = ?
+                    """,
+                    (candidate_id, intake_id),
+                ).fetchone()
+                if candidate is None:
+                    raise HTTPException(status_code=422, detail="Selected result does not belong to this intake")
+                selected_candidates[candidate_id] = candidate
+
+            for field_name, candidate_id in request.selected_field_sources.items():
+                fields = json.loads(selected_candidates[candidate_id]["fields_json"])
+                if field_name not in fields:
+                    raise HTTPException(status_code=422, detail=f"Selected result does not contain {field_name}")
+
+            evidence_by_id: dict[str, tuple[sqlite3.Row, dict]] = {}
+            all_candidates = connection.execute(
+                """
+                SELECT id, source_name, source_type, fields_json, evidence_json, retrieved_at
+                FROM intake_candidates WHERE intake_id = ?
+                """,
+                (intake_id,),
+            ).fetchall()
+            for candidate in all_candidates:
+                for evidence in json.loads(candidate["evidence_json"]):
+                    evidence_by_id[evidence["id"]] = (candidate, evidence)
+            for evidence_id in request.selected_evidence_ids:
+                if evidence_id not in evidence_by_id:
+                    raise HTTPException(status_code=422, detail="Selected price evidence does not belong to this intake")
+
+            item_id, _ = insert_inventory_item(connection, request.item, is_published=False)
+            for field_name, candidate_id in request.selected_field_sources.items():
+                candidate = selected_candidates[candidate_id]
+                source_value = json.loads(candidate["fields_json"])[field_name]
+                connection.execute(
+                    """
+                    INSERT INTO item_identification_sources(
+                        id, item_id, field_name, source_name, source_type, source_value, retrieved_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(uuid.uuid4()),
+                        item_id,
+                        field_name,
+                        candidate["source_name"],
+                        candidate["source_type"],
+                        str(source_value),
+                        candidate["retrieved_at"],
+                    ),
+                )
+
+            for evidence_id in request.selected_evidence_ids:
+                candidate, evidence = evidence_by_id[evidence_id]
+                amount = Decimal(evidence["amount"])
+                connection.execute(
+                    """
+                    INSERT INTO item_price_evidence(
+                        id, item_id, evidence_type, title, source_name, product_url,
+                        amount_cents, currency, retrieved_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        evidence_id,
+                        item_id,
+                        evidence["evidence_type"],
+                        evidence["title"],
+                        candidate["source_name"],
+                        evidence.get("product_url", ""),
+                        price_to_cents(amount),
+                        evidence.get("currency", "USD"),
+                        candidate["retrieved_at"],
+                    ),
+                )
+
+            staged_photos = connection.execute(
+                "SELECT id, kind, filename, media_type FROM assisted_intake_photos WHERE intake_id = ?",
+                (intake_id,),
+            ).fetchall()
+            for photo in staged_photos:
+                source = INTAKE_UPLOAD_DIR / photo["filename"]
+                if not source.is_file():
+                    raise HTTPException(status_code=404, detail="A staged intake photo is missing")
+                suffix = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}[photo["media_type"]]
+                filename = f"{photo['id']}{suffix}"
+                destination = UPLOAD_DIR / filename
+                shutil.copyfile(source, destination)
+                copied_files.append(destination)
+                staged_files.append(source)
+                connection.execute(
+                    """
+                    INSERT INTO item_photos(id, item_id, kind, filename, media_type, is_public, created_at)
+                    VALUES (?, ?, ?, ?, ?, 0, ?)
+                    """,
+                    (photo["id"], item_id, photo["kind"], filename, photo["media_type"], timestamp()),
+                )
+            connection.execute("DELETE FROM assisted_intakes WHERE id = ?", (intake_id,))
+    except Exception:
+        for path in copied_files:
+            path.unlink(missing_ok=True)
+        raise
+
+    for path in staged_files:
+        path.unlink(missing_ok=True)
+    with connect_db() as connection:
+        item_result = item_record(fetch_item(connection, item_id), include_private=True)
+        item_result["photos"] = [
+            {
+                "id": row["id"],
+                "kind": row["kind"],
+                "is_public": bool(row["is_public"]),
+                "media_type": row["media_type"],
+                "created_at": row["created_at"],
+            }
+            for row in connection.execute(
+                "SELECT id, kind, is_public, media_type, created_at FROM item_photos WHERE item_id = ?",
+                (item_id,),
+            ).fetchall()
+        ]
+        item_result["price_evidence"] = [
+            {
+                "id": row["id"],
+                "evidence_type": row["evidence_type"],
+                "title": row["title"],
+                "source_name": row["source_name"],
+                "product_url": row["product_url"],
+                "amount": money_from_cents(row["amount_cents"]),
+                "currency": row["currency"],
+                "retrieved_at": row["retrieved_at"],
+            }
+            for row in connection.execute(
+                "SELECT * FROM item_price_evidence WHERE item_id = ?",
+                (item_id,),
+            ).fetchall()
+        ]
+    return item_result
+
+
 @app.get("/api/admin/items")
 def list_admin_items(_: Annotated[str, Depends(require_admin)]) -> list[dict]:
     with connect_db() as connection:
@@ -663,6 +1302,40 @@ def list_admin_items(_: Annotated[str, Depends(require_admin)]) -> list[dict]:
                 }
                 for photo in photos
             ]
+            evidence = connection.execute(
+                "SELECT * FROM item_price_evidence WHERE item_id = ? ORDER BY retrieved_at DESC",
+                (record["id"],),
+            ).fetchall()
+            record["price_evidence"] = [
+                {
+                    "id": row["id"],
+                    "evidence_type": row["evidence_type"],
+                    "title": row["title"],
+                    "source_name": row["source_name"],
+                    "product_url": row["product_url"],
+                    "amount": money_from_cents(row["amount_cents"]),
+                    "currency": row["currency"],
+                    "retrieved_at": row["retrieved_at"],
+                }
+                for row in evidence
+            ]
+            identification = connection.execute(
+                """
+                SELECT field_name, source_name, source_value, retrieved_at
+                FROM item_identification_sources WHERE item_id = ?
+                ORDER BY field_name
+                """,
+                (record["id"],),
+            ).fetchall()
+            record["identification_sources"] = [
+                {
+                    "field_name": row["field_name"],
+                    "source_name": row["source_name"],
+                    "source_value": row["source_value"],
+                    "retrieved_at": row["retrieved_at"],
+                }
+                for row in identification
+            ]
     return result
 
 
@@ -671,44 +1344,9 @@ def create_item(
     item: ItemCreate,
     _: Annotated[str, Depends(require_admin)],
 ) -> dict:
-    now = timestamp()
-    item_id = str(uuid.uuid4())
     with connect_db() as connection:
-        cat_id = category_id(connection, item.category)
-        availability = normalize_availability(
-            item.availability, item.quantity, item.reserved_quantity, item.sold_quantity
-        )
-        connection.execute(
-            """
-            INSERT INTO items (
-                id, name, brand, model, barcode, category_id, description, condition,
-                quantity, reserved_quantity, sold_quantity, availability, asking_price_cents,
-                private_notes, storage_location, is_published, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                item_id,
-                item.name,
-                item.brand,
-                item.model,
-                item.barcode,
-                cat_id,
-                item.description,
-                item.condition,
-                item.quantity,
-                item.reserved_quantity,
-                item.sold_quantity,
-                availability,
-                price_to_cents(item.asking_price),
-                item.private_notes,
-                item.storage_location,
-                int(item.is_published),
-                now,
-                now,
-            ),
-        )
-        row = fetch_item(connection, item_id)
-    return item_record(row, include_private=True)
+        _, record = insert_inventory_item(connection, item)
+        return record
 
 
 @app.patch("/api/admin/items/{item_id}")
@@ -726,6 +1364,7 @@ def update_item(
             "name": existing["name"],
             "brand": existing["brand"],
             "model": existing["model"],
+            "manufacturer_part_number": existing["manufacturer_part_number"],
             "barcode": existing["barcode"],
             "category": existing["category"],
             "description": existing["description"],
@@ -760,7 +1399,7 @@ def update_item(
         connection.execute(
             """
             UPDATE items SET
-                name = ?, brand = ?, model = ?, barcode = ?, category_id = ?, description = ?,
+                name = ?, brand = ?, model = ?, manufacturer_part_number = ?, barcode = ?, category_id = ?, description = ?,
                 condition = ?, quantity = ?, reserved_quantity = ?, sold_quantity = ?,
                 availability = ?, asking_price_cents = ?, private_notes = ?, storage_location = ?,
                 is_published = ?, updated_at = ?
@@ -770,6 +1409,7 @@ def update_item(
                 merged["name"],
                 merged["brand"],
                 merged["model"],
+                merged["manufacturer_part_number"],
                 merged["barcode"],
                 cat_id,
                 merged["description"],
@@ -889,16 +1529,7 @@ def update_photo_visibility(
     return {"id": photo_id, "is_public": is_public}
 
 
-@app.post("/api/admin/items/{item_id}/photos", status_code=status.HTTP_201_CREATED)
-async def upload_item_photo(
-    item_id: str,
-    _: Annotated[str, Depends(require_admin)],
-    file: Annotated[UploadFile, File()],
-    kind: Annotated[PhotoKind, Form()],
-    is_public: Annotated[bool, Form()] = False,
-) -> dict:
-    if is_public and kind != "product":
-        raise HTTPException(status_code=422, detail="Only product photos can be public")
+async def read_valid_image(file: UploadFile) -> bytes:
     payload = await file.read(MAX_IMAGE_BYTES + 1)
     if not payload:
         raise HTTPException(status_code=422, detail="The uploaded image is empty")
@@ -913,10 +1544,25 @@ async def upload_item_photo(
             image.verify()
     except (UnidentifiedImageError, OSError) as exc:
         raise HTTPException(status_code=415, detail="The upload is not a valid image") from exc
+    return payload
+
+
+@app.post("/api/admin/items/{item_id}/photos", status_code=status.HTTP_201_CREATED)
+async def upload_item_photo(
+    item_id: str,
+    _: Annotated[str, Depends(require_admin)],
+    file: Annotated[UploadFile, File()],
+    kind: Annotated[PhotoKind, Form()],
+    is_public: Annotated[bool, Form()] = False,
+) -> dict:
+    if is_public and kind != "product":
+        raise HTTPException(status_code=422, detail="Only product photos can be public")
+    payload = await read_valid_image(file)
 
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     photo_id = str(uuid.uuid4())
-    filename = f"{photo_id}{Path(file.filename or '').suffix.lower()[:8]}"
+    extension = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}[file.content_type]
+    filename = f"{photo_id}{extension}"
     destination = UPLOAD_DIR / filename
     with connect_db() as connection:
         fetch_item(connection, item_id)

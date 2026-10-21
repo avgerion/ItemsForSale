@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -10,6 +11,7 @@ DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 DATA_DIR = Path(os.environ.get("INVENTORY_DATA_DIR", DEFAULT_DATA_DIR)).resolve()
 DB_PATH = Path(os.environ.get("INVENTORY_DB_PATH", DATA_DIR / "inventory.sqlite3")).resolve()
 UPLOAD_DIR = Path(os.environ.get("INVENTORY_UPLOAD_DIR", DATA_DIR / "uploads")).resolve()
+INTAKE_UPLOAD_DIR = Path(os.environ.get("INVENTORY_INTAKE_DIR", DATA_DIR / "intake")).resolve()
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS categories (
@@ -22,6 +24,7 @@ CREATE TABLE IF NOT EXISTS items (
     name TEXT NOT NULL,
     brand TEXT NOT NULL DEFAULT '',
     model TEXT NOT NULL DEFAULT '',
+    manufacturer_part_number TEXT NOT NULL DEFAULT '',
     barcode TEXT NOT NULL DEFAULT '',
     category_id INTEGER REFERENCES categories(id) ON DELETE RESTRICT,
     description TEXT NOT NULL DEFAULT '',
@@ -66,6 +69,56 @@ CREATE TABLE IF NOT EXISTS admin_sessions (
     username TEXT NOT NULL,
     expires_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS assisted_intakes (
+    id TEXT PRIMARY KEY,
+    barcode TEXT NOT NULL DEFAULT '',
+    manufacturer_part_number TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    expires_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS assisted_intake_photos (
+    id TEXT PRIMARY KEY,
+    intake_id TEXT NOT NULL REFERENCES assisted_intakes(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (kind IN ('product', 'package', 'barcode')),
+    filename TEXT NOT NULL UNIQUE,
+    media_type TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS intake_candidates (
+    id TEXT PRIMARY KEY,
+    intake_id TEXT NOT NULL REFERENCES assisted_intakes(id) ON DELETE CASCADE,
+    source_name TEXT NOT NULL,
+    source_type TEXT NOT NULL,
+    fields_json TEXT NOT NULL,
+    evidence_json TEXT NOT NULL,
+    retrieved_at TEXT NOT NULL,
+    is_fixture INTEGER NOT NULL DEFAULT 0 CHECK (is_fixture IN (0, 1))
+);
+
+CREATE TABLE IF NOT EXISTS item_price_evidence (
+    id TEXT PRIMARY KEY,
+    item_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    evidence_type TEXT NOT NULL CHECK (evidence_type IN ('retail_reference', 'active_listing', 'completed_sale')),
+    title TEXT NOT NULL,
+    source_name TEXT NOT NULL,
+    product_url TEXT NOT NULL DEFAULT '',
+    amount_cents INTEGER NOT NULL CHECK (amount_cents >= 0),
+    currency TEXT NOT NULL DEFAULT 'USD',
+    retrieved_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS item_identification_sources (
+    id TEXT PRIMARY KEY,
+    item_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    field_name TEXT NOT NULL,
+    source_name TEXT NOT NULL,
+    source_type TEXT NOT NULL,
+    source_value TEXT NOT NULL,
+    retrieved_at TEXT NOT NULL
+);
 """
 
 
@@ -88,9 +141,36 @@ def connect_db() -> Iterator[sqlite3.Connection]:
 def initialize_database() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    INTAKE_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     with connect_db() as connection:
         connection.executescript(SCHEMA)
+        for table_name in ("items", "assisted_intakes"):
+            existing_columns = {
+                row["name"] for row in connection.execute(f"PRAGMA table_info({table_name})")
+            }
+            if "manufacturer_part_number" not in existing_columns:
+                connection.execute(
+                    f"ALTER TABLE {table_name} ADD COLUMN manufacturer_part_number TEXT NOT NULL DEFAULT ''"
+                )
         connection.executemany(
             "INSERT OR IGNORE INTO categories(name) VALUES (?)",
             [("Lighting",), ("Tools",), ("Home",)],
         )
+    purge_expired_intakes()
+
+
+def purge_expired_intakes(now_epoch: int | None = None) -> None:
+    current_time = int(time.time()) if now_epoch is None else now_epoch
+    with connect_db() as connection:
+        expired_photos = connection.execute(
+            """
+            SELECT assisted_intake_photos.filename
+            FROM assisted_intake_photos
+            JOIN assisted_intakes ON assisted_intakes.id = assisted_intake_photos.intake_id
+            WHERE assisted_intakes.expires_at <= ?
+            """,
+            (current_time,),
+        ).fetchall()
+        connection.execute("DELETE FROM assisted_intakes WHERE expires_at <= ?", (current_time,))
+    for row in expired_photos:
+        (INTAKE_UPLOAD_DIR / row["filename"]).unlink(missing_ok=True)

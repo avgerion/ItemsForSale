@@ -1,0 +1,65 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Start Inventory Server",
+      "type": "process",
+      "command": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+      "args": [
+        "-m",
+        "uvicorn",
+        "app.main:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8000",
+        "--reload"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "focus": false
+      }
+    },
+    {
+      "label": "Check Inventory Server Health",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-Command",
+        "Invoke-RestMethod -Uri 'http://127.0.0.1:8000/health' | ConvertTo-Json -Depth 4"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "Run Inventory Tests",
+      "type": "process",
+      "command": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+      "args": [
+        "-m",
+        "pytest",
+        "-q"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Project Status and Next Steps",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-Command",
+        "Write-Output 'PROJECT STATUS'; Write-Output 'Working local inventory app: FastAPI + SQLite with Bokeh-rendered catalog and owner workspace.'; Write-Output 'Implemented: authenticated management, inventory/photos, publication controls, sale events, assisted intake, provider adapters, and public catalog.'; Write-Output 'Assisted-intake plan: implementation steps 1-5 are marked complete; step 6 provider/security/recovery validation remains open.'; Write-Output ''; Write-Output 'NEXT STEPS'; Write-Output '1. Run the focused provider failure, rate-limit, ambiguous-result, cleanup, and privacy tests.'; Write-Output '2. Validate catalog and owner workflows at phone-sized widths; confirm private data stays out of public responses.'; Write-Output '3. Configure deployment HTTPS, secrets, and automated database/photo backups; test a restore before public launch.'; Write-Output '4. Revisit README.md and IMPLEMENTATION-PLAN.md as work progresses.'"
+      ],
+      "problemMatcher": []
+    }
+  ]
+}

@@ -131,6 +131,31 @@
     .event-form { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
     .category-name { color: #39434c; font-size: 12px; font-weight: 620; }
     .helper { padding: 12px; border-radius: 8px; color: #67746a; background: #f1f5f1; font-size: 10px; line-height: 1.6; }
+    .intake-list, .candidate-list, .intake-photos { display: grid; gap: 10px; }
+    .intake-card, .candidate-card { border: 1px solid var(--line); border-radius: 9px; padding: 12px; }
+    .intake-card { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .intake-card strong, .candidate-card h3 { margin: 0; font-size: 12px; }
+    .intake-card p, .candidate-card p { color: var(--muted); font-size: 10px; line-height: 1.5; margin: 4px 0 0; }
+    .intake-photos { grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); margin: 12px 0; }
+    .intake-photos img { display: block; width: 100%; height: 84px; object-fit: cover; border-radius: 6px; background: #f0f1f3; }
+    .candidate-card h3 { margin-bottom: 8px; }
+    .candidate-field { display: grid; grid-template-columns: 20px minmax(80px, 110px) 1fr; align-items: start; gap: 7px; padding: 7px 0; border-top: 1px solid #eef0f2; font-size: 10px; overflow-wrap: anywhere; }
+    .candidate-field input { margin: 1px 0 0; }
+    .candidate-field strong { color: var(--muted); }
+    .fixture-warning { padding: 12px; margin: 12px 0; border: 1px solid #e7b45c; border-radius: 8px; background: #fff7e6; color: #6b4b12; font-size: 11px; line-height: 1.6; }
+    .intake-methods { display: grid; gap: 8px; margin: 14px 0; }
+    .intake-method { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 8px; align-items: start; padding: 9px; border: 1px solid #e5e8ec; border-radius: 8px; font-size: 11px; line-height: 1.4; }
+    .intake-method input { margin: 2px 0 0; }
+    .intake-method small { display: block; color: var(--muted); margin-top: 2px; }
+    .intake-method:has(input:disabled) { opacity: .65; }
+    .intake-identifiers { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; align-items: end; margin: 14px 0; }
+    .intake-photo-choice { display: flex; align-items: center; gap: 5px; margin-top: 5px; color: var(--muted); font-size: 10px; }
+    .intake-provider-group { margin-top: 14px; }
+    .intake-provider-group h4 { margin: 12px 0 6px; }
+    .candidate-notes { margin-top: 8px; padding: 8px; border-radius: 6px; background: #f5f7fa; color: var(--muted); font-size: 11px; }
+    .intake-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+    .evidence-row { display: flex; align-items: flex-start; gap: 8px; padding: 9px 0; border-top: 1px solid #eef0f2; font-size: 10px; line-height: 1.5; }
+    .evidence-row input { margin-top: 2px; }
     @media (max-width: 1050px) {
       .layout { grid-template-columns: 190px minmax(0, 1fr); }
       .content-grid { grid-template-columns: minmax(0, 1fr); }
@@ -176,9 +201,11 @@
         <div class="nav-label">Workspace</div>
         <nav class="nav-list" aria-label="Admin sections">
           <button class="nav-button" data-view="overview" aria-current="page"><span class="nav-icon">⌂</span>Overview</button>
+          <button class="nav-button" data-view="intake"><span class="nav-icon">＋</span>Assisted intake</button>
           <button class="nav-button" data-view="inventory"><span class="nav-icon">▤</span>Inventory <span class="badge" id="nav-inventory-count">0</span></button>
           <button class="nav-button" data-view="events"><span class="nav-icon">▦</span>Sale events</button>
           <button class="nav-button" data-view="categories"><span class="nav-icon">◇</span>Categories</button>
+          <button class="nav-button" data-view="backups"><span class="nav-icon">⇩</span>Backups</button>
         </nav>
         <div class="nav-label">Quick note</div>
         <div class="aside-note"><strong>Private by default</strong><br>Room, shelf and bin locations, private notes, and package/barcode photos stay out of the public catalog.</div>
@@ -208,6 +235,36 @@
           </div>
         </section>
 
+        <section class="section" id="view-intake">
+          <div class="page-heading">
+            <div><p class="eyebrow">Private workbench</p><h1>Assisted intake</h1><p class="subheading">Stage photos and review candidate details before creating an inventory draft.</p></div>
+          </div>
+          <div class="content-grid">
+            <section class="panel">
+              <div class="panel-head"><div><h2 class="panel-title">Start an intake</h2><p class="panel-description">Staged photos are private and automatically expire after 48 hours.</p></div></div>
+              <div class="panel-body">
+                <form id="intake-form">
+                  <label class="field">UPC / barcode<input class="control" id="intake-barcode" maxlength="80" placeholder="Enter it manually or add a barcode photo"></label>
+                  <label class="field">Manufacturer part number<input class="control" id="intake-manufacturer-part-number" maxlength="120" placeholder="Optional; kept separate from Model"></label>
+                  <label class="field">Product photos<input class="control" id="intake-product-files" type="file" accept="image/jpeg,image/png,image/webp" multiple></label>
+                  <label class="field">Package photos<input class="control" id="intake-package-files" type="file" accept="image/jpeg,image/png,image/webp" multiple></label>
+                  <label class="field">Barcode photos<input class="control" id="intake-barcode-files" type="file" accept="image/jpeg,image/png,image/webp" multiple></label>
+                  <p class="selection-hint">Choose photos by type. They are staged privately and are not sent to any external service in this workflow.</p>
+                  <button class="button button-primary" type="submit" id="start-intake">Stage photos</button>
+                </form>
+              </div>
+              <div class="panel-head"><div><h2 class="panel-title">Open intakes</h2><p class="panel-description">Unfinished intakes are removed after 48 hours.</p></div></div>
+              <div class="panel-body intake-list" id="intake-list"><div class="empty">No staged intakes.</div></div>
+            </section>
+            <section class="panel" id="intake-review">
+              <div class="panel-head"><div><h2 class="panel-title">Review candidate results</h2><p class="panel-description" id="intake-review-meta">Choose an intake to inspect its photos and results.</p></div></div>
+              <div class="panel-body">
+                <div id="intake-review-content"><div class="empty">Start an intake, then choose its Review button here.</div></div>
+              </div>
+            </section>
+          </div>
+        </section>
+
         <section class="section" id="view-inventory">
           <div class="page-heading">
             <div><p class="eyebrow">Stockroom</p><h1>Inventory</h1><p class="subheading">Keep each listing, its condition, and available units up to date.</p></div>
@@ -218,7 +275,7 @@
               <div class="panel-head"><div><h2 class="panel-title">All items <span class="badge" id="item-count">0</span></h2><p class="panel-description">Drafts and private listings are shown only here.</p></div></div>
               <div class="panel-body">
                 <div class="toolbar">
-                  <input class="control" id="item-search" type="search" placeholder="Search by item, brand, model..." aria-label="Search inventory">
+                  <input class="control" id="item-search" type="search" placeholder="Search by item, brand, model, identifier..." aria-label="Search inventory">
                   <select class="control" id="item-category-filter" aria-label="Filter by category"><option value="">All categories</option></select>
                   <select class="control" id="item-status-filter" aria-label="Filter by status"><option value="">All statuses</option><option value="available">Available</option><option value="reserved">Reserved</option><option value="sold">Sold</option><option value="hidden">Hidden</option></select>
                 </div>
@@ -236,6 +293,7 @@
                       <label class="field">Condition<select class="control" id="condition"><option value="new_sealed">New/sealed</option><option value="open_box">Open box</option><option value="used_good">Used/good</option><option value="used_fair">Used/fair</option><option value="for_parts_untested">For parts/untested</option></select></label>
                       <label class="field">Brand<input class="control" id="brand" maxlength="120" placeholder="Optional"></label>
                       <label class="field">Model<input class="control" id="model" maxlength="120" placeholder="Optional"></label>
+                      <label class="field">Manufacturer part number<input class="control" id="manufacturer_part_number" maxlength="120" placeholder="Optional"></label>
                       <label class="field">Total units<input class="control" type="number" min="1" value="1" id="quantity"></label>
                       <label class="field">Reserved<input class="control" type="number" min="0" value="0" id="reserved_quantity"></label>
                       <label class="field">Sold<input class="control" type="number" min="0" value="0" id="sold_quantity"></label>
@@ -247,6 +305,7 @@
                       <label class="field field-wide">Private notes<textarea class="control" id="private_notes" rows="2" maxlength="5000" placeholder="Notes for you and your helpers"></textarea></label>
                       <label class="field-check field-wide"><input type="checkbox" id="is_published"> Publish this listing in the public catalog</label>
                     </div>
+                    <input type="hidden" id="item-intake-id">
                     <div class="form-actions"><button class="button button-primary" type="submit" id="save-item">Save item</button><button class="button" type="button" id="cancel-edit">Clear</button></div>
                   </form>
                 </div>
@@ -297,13 +356,34 @@
             </div></section>
           </div>
         </section>
+
+        <section class="section" id="view-backups">
+          <div class="page-heading"><div><p class="eyebrow">Protect your data</p><h1>Backups</h1><p class="subheading">Download your inventory and photos, or save a copy to a USB drive attached to this server.</p></div></div>
+          <div class="content-grid">
+            <section class="panel">
+              <div class="panel-head"><div><h2 class="panel-title">Download to this device</h2><p class="panel-description">Your browser downloads a complete ZIP backup. Choose a USB drive on this computer as the download location if prompted.</p></div></div>
+              <div class="panel-body">
+                <p class="helper">Includes a consistent SQLite database snapshot, item photos, and staged intake photos. It contains private notes and unpublished records. Keep the archive private; it does not include your .env file or API credentials.</p>
+                <a class="button button-primary" href="/api/admin/backups/download">Download backup ZIP</a>
+              </div>
+            </section>
+            <section class="panel">
+              <div class="panel-head"><div><h2 class="panel-title">Save to server USB storage</h2><p class="panel-description">Configure INVENTORY_BACKUP_DIR to the server's mounted USB directory. The backup runs on the server.</p></div></div>
+              <div class="panel-body">
+                <p class="helper" id="backup-server-status" role="status">Checking server backup storage…</p>
+                <button class="button" type="button" id="save-server-backup" disabled>Save / replace server backup</button>
+                <p class="selection-hint">Writes one file named items-for-sale-backup.zip and replaces the previous copy. The configured directory must already be mounted and writable.</p>
+              </div>
+            </section>
+          </div>
+        </section>
       </main>
     </div>
   </div>
   <script>
     const $ = (id) => document.getElementById(id);
-    const ui = { items: [], categories: [], events: [], selectedItem: null, noticeTimer: null };
-    const fieldNames = ["name", "category", "brand", "model", "barcode", "condition", "quantity", "reserved_quantity", "sold_quantity", "asking_price", "availability", "storage_location", "description", "private_notes", "is_published"];
+    const ui = { items: [], categories: [], events: [], intakes: [], providers: [], backupStatus: null, activeIntake: null, selectedFieldSources: {}, selectedItem: null, noticeTimer: null };
+    const fieldNames = ["name", "category", "brand", "model", "manufacturer_part_number", "barcode", "condition", "quantity", "reserved_quantity", "sold_quantity", "asking_price", "availability", "storage_location", "description", "private_notes", "is_published"];
 
     async function api(url, options = {}) {
       const headers = { ...(options.body instanceof FormData ? {} : { "Content-Type": "application/json" }), ...(options.headers || {}) };
@@ -361,7 +441,7 @@
       const category = $("item-category-filter").value;
       const status = $("item-status-filter").value;
       return ui.items.filter((item) => {
-        const searchText = [item.name, item.brand, item.model, item.barcode, item.category, item.description, item.storage_location].join(" ").toLowerCase();
+        const searchText = [item.name, item.brand, item.model, item.manufacturer_part_number, item.barcode, item.category, item.description, item.storage_location].join(" ").toLowerCase();
         return (!query || searchText.includes(query)) && (!category || item.category === category) && (!status || item.availability === status);
       });
     }
@@ -381,7 +461,10 @@
         name.appendChild(title);
         const meta = document.createElement("div");
         meta.className = "item-meta";
-        meta.textContent = [item.brand, item.model].filter(Boolean).join(" · ") || "No brand or model";
+        const identity = [item.brand, item.model, item.manufacturer_part_number, item.barcode].filter(Boolean).join(" · ") || "No brand or model";
+        const evidence = (item.price_evidence || []).map((entry) =>
+          `${entry.evidence_type.replaceAll("_", " ")} ${entry.currency} ${entry.amount.toFixed(2)} (${entry.source_name})`);
+        meta.textContent = [identity, ...evidence].join(" · ");
         name.appendChild(meta);
         row.append(name, makeCell(item.category), makeCell(item.condition_label), makeCell(`${item.available_quantity} / ${item.quantity}`), makeCell(`$${item.asking_price.toFixed(2)}`));
         const status = document.createElement("td");
@@ -522,31 +605,362 @@
       });
     }
 
+    function renderIntakeList() {
+      const container = $("intake-list");
+      container.replaceChildren();
+      if (!ui.intakes.length) {
+        const empty = document.createElement("div");
+        empty.className = "empty";
+        empty.textContent = "No staged intakes.";
+        container.appendChild(empty);
+        return;
+      }
+      ui.intakes.forEach((intake) => {
+        const card = document.createElement("article");
+        card.className = "intake-card";
+        const detail = document.createElement("div");
+        const title = document.createElement("strong");
+        title.textContent = intake.barcode
+          ? `Barcode ${intake.barcode}`
+          : intake.manufacturer_part_number
+            ? `MPN ${intake.manufacturer_part_number}`
+            : "Item without identifier";
+        const subtitle = document.createElement("p");
+        subtitle.textContent = `${intake.photos.length} photo${intake.photos.length === 1 ? "" : "s"} · expires ${formatDate(new Date(intake.expires_at * 1000).toISOString())}`;
+        detail.append(title, subtitle);
+        const actions = document.createElement("div");
+        actions.className = "row-actions";
+        appendAction(actions, "Review", () => openIntake(intake.id));
+        card.append(detail, actions);
+        container.appendChild(card);
+      });
+    }
+
+    function renderIntakeReview(intake) {
+      const content = $("intake-review-content");
+      content.replaceChildren();
+      $("intake-review-meta").textContent = `Barcode: ${intake.barcode || "not entered"} · MPN: ${intake.manufacturer_part_number || "not entered"} · expires ${formatDate(new Date(intake.expires_at * 1000).toISOString())}`;
+      const warning = document.createElement("div");
+      warning.className = "fixture-warning";
+      warning.textContent = "Live providers run only when explicitly selected. Configure any required credentials or local software first; only photos you check are sent to a vision service.";
+      content.appendChild(warning);
+
+      const photoGrid = document.createElement("div");
+      photoGrid.className = "intake-photos";
+      if (!intake.photos.length) {
+        const empty = document.createElement("p");
+        empty.className = "selection-hint";
+        empty.textContent = "No photos in this intake.";
+        photoGrid.appendChild(empty);
+      }
+      intake.photos.forEach((photo) => {
+        const figure = document.createElement("figure");
+        const image = document.createElement("img");
+        image.src = photo.url;
+        image.alt = `${photo.kind} intake photo`;
+        const caption = document.createElement("figcaption");
+        caption.textContent = photo.kind;
+        const photoChoice = document.createElement("label");
+        photoChoice.className = "intake-photo-choice";
+        const photoCheckbox = document.createElement("input");
+        photoCheckbox.type = "checkbox";
+        photoCheckbox.dataset.providerPhoto = photo.id;
+        const photoChoiceText = document.createElement("span");
+        photoChoiceText.textContent = "Select for next local or vision run";
+        photoChoice.append(photoCheckbox, photoChoiceText);
+        figure.append(image, caption, photoChoice);
+        photoGrid.appendChild(figure);
+      });
+      content.appendChild(photoGrid);
+
+      const identifiers = document.createElement("form");
+      identifiers.className = "intake-identifiers";
+      [
+        { name: "barcode", label: "UPC / barcode", value: intake.barcode, maxLength: 80 },
+        {
+          name: "manufacturer_part_number",
+          label: "Manufacturer part number",
+          value: intake.manufacturer_part_number,
+          maxLength: 120,
+        },
+      ].forEach((field) => {
+        const label = document.createElement("label");
+        label.className = "field";
+        label.append(document.createTextNode(field.label));
+        const input = document.createElement("input");
+        input.className = "control";
+        input.name = field.name;
+        input.maxLength = field.maxLength;
+        input.value = field.value;
+        label.appendChild(input);
+        identifiers.appendChild(label);
+      });
+      const saveIdentifiers = document.createElement("button");
+      saveIdentifiers.className = "button";
+      saveIdentifiers.type = "submit";
+      saveIdentifiers.textContent = "Save identifiers";
+      identifiers.appendChild(saveIdentifiers);
+      identifiers.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const formData = new FormData(identifiers);
+        const submit = identifiers.querySelector("button[type=submit]");
+        submit.disabled = true;
+        try {
+          const updated = await api(`/api/admin/intakes/${encodeURIComponent(intake.id)}`, {
+            method: "PATCH",
+            body: JSON.stringify({
+              barcode: String(formData.get("barcode") || "").trim(),
+              manufacturer_part_number: String(formData.get("manufacturer_part_number") || "").trim(),
+            }),
+          });
+          ui.activeIntake = updated;
+          await refreshData();
+          renderIntakeReview(updated);
+          notify("Barcode and manufacturer part number saved to this intake.");
+        } catch (error) { notify(error.message, true); }
+        finally { submit.disabled = false; }
+      });
+      content.appendChild(identifiers);
+
+      const methodHeading = document.createElement("h3");
+      methodHeading.textContent = "Choose one method to run";
+      content.appendChild(methodHeading);
+      const methodHint = document.createElement("p");
+      methodHint.className = "selection-hint";
+      methodHint.textContent = "Run one method at a time. Each run adds its candidates below without replacing earlier results. Image checkboxes start unchecked; selected photos are sent only to the explicitly selected vision provider.";
+      content.appendChild(methodHint);
+      const methodList = document.createElement("div");
+      methodList.className = "intake-provider-group";
+      const hasIdentifier = Boolean(intake.barcode || intake.manufacturer_part_number);
+      const addMethod = (method) => {
+        const label = document.createElement("label");
+        label.className = "intake-method";
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.name = "intake-method";
+        checkbox.value = method.id;
+        checkbox.disabled = !method.enabled;
+        checkbox.addEventListener("change", () => {
+          if (checkbox.checked) {
+            methodList.querySelectorAll('input[name="intake-method"]').forEach((other) => {
+              if (other !== checkbox) other.checked = false;
+            });
+          }
+        });
+        const text = document.createElement("span");
+        text.append(document.createTextNode(method.name));
+        const detail = document.createElement("small");
+        detail.textContent = method.detail;
+        text.appendChild(detail);
+        label.append(checkbox, text);
+        methodList.appendChild(label);
+      };
+      const liveHeading = document.createElement("h4");
+      liveHeading.textContent = "Live providers";
+      methodList.appendChild(liveHeading);
+      ui.providers.forEach((provider) => {
+        const needsIdentifier = ["upcitemdb", "upcdatabase", "ebay_active"].includes(provider.id);
+        const needsPhoto = ["vision_gemini", "vision_openai", "vision_groqcloud", "barcode_local"].includes(provider.id);
+        const usablePhoto = intake.photos.some((photo) => photo.kind === "product" || photo.kind === "package" || photo.kind === "barcode");
+        addMethod({
+          id: provider.id,
+          name: provider.name,
+          detail: `${provider.detail}${provider.configured ? "" : " · setup required"}${needsIdentifier && !hasIdentifier ? " · enter an identifier first" : ""}`,
+          enabled: (!needsIdentifier || hasIdentifier) && (!needsPhoto || usablePhoto),
+        });
+      });
+      const soldNote = document.createElement("p");
+      soldNote.className = "selection-hint";
+      soldNote.textContent = "eBay completed/sold-item history is not included: the official Marketplace Insights API requires restricted access.";
+      methodList.appendChild(soldNote);
+      content.appendChild(methodList);
+
+      const lookup = document.createElement("button");
+      lookup.type = "button";
+      lookup.className = "button button-primary";
+      lookup.textContent = "Generate results";
+      lookup.addEventListener("click", async () => {
+        const selectedMethod = methodList.querySelector('input[name="intake-method"]:checked');
+        if (!selectedMethod) { notify("Select one available method first.", true); return; }
+        lookup.disabled = true;
+        try {
+          const sendPhotos = ["vision_gemini", "vision_openai", "vision_groqcloud", "barcode_local"].includes(selectedMethod.value);
+          const photoIds = sendPhotos
+            ? [...content.querySelectorAll("input[data-provider-photo]:checked")].map((input) => input.dataset.providerPhoto)
+            : [];
+          if (["vision_gemini", "vision_openai", "vision_groqcloud", "barcode_local"].includes(selectedMethod.value) && !photoIds.length) {
+            throw new Error("Select at least one photo for this method.");
+          }
+          if (selectedMethod.value === "vision_groqcloud" && photoIds.length > 3) {
+            throw new Error("Select no more than 3 photos for GroqCloud vision.");
+          }
+          const updated = await api(`/api/admin/intakes/${encodeURIComponent(intake.id)}/lookup`, {
+            method: "POST",
+            body: JSON.stringify({ method: selectedMethod.value, photo_ids: photoIds }),
+          });
+          ui.activeIntake = updated;
+          renderIntakeReview(updated);
+          notify("Provider results added for review.");
+        } catch (error) { notify(error.message, true); }
+        finally { lookup.disabled = false; }
+      });
+      content.appendChild(lookup);
+
+      if (intake.candidates.length) {
+        const candidatesHeading = document.createElement("h3");
+        candidatesHeading.textContent = "Candidate fields";
+        content.appendChild(candidatesHeading);
+        const candidateList = document.createElement("div");
+        candidateList.className = "candidate-list";
+        intake.candidates.forEach((candidate) => {
+          const card = document.createElement("article");
+          card.className = "candidate-card";
+          const heading = document.createElement("h3");
+          heading.textContent = candidate.source_name;
+          const description = document.createElement("p");
+          description.textContent = `${candidate.is_fixture ? "Synthetic sample" : "Unverified provider suggestion"} · retrieved ${formatDate(candidate.retrieved_at)}`;
+          card.append(heading, description);
+          if (candidate.match_notes) {
+            const notes = document.createElement("p");
+            notes.className = "candidate-notes";
+            notes.textContent = candidate.match_notes;
+            card.appendChild(notes);
+          }
+          Object.entries(candidate.fields).forEach(([field, value]) => {
+            if (!value || !$(field)) return;
+            const row = document.createElement("label");
+            row.className = "candidate-field";
+            const input = document.createElement("input");
+            input.type = "checkbox";
+            input.dataset.candidateId = candidate.id;
+            input.dataset.fieldName = field;
+            const fieldLabel = document.createElement("strong");
+            fieldLabel.textContent = field;
+            const fieldValue = document.createElement("span");
+            fieldValue.textContent = value;
+            row.append(input, fieldLabel, fieldValue);
+            card.appendChild(row);
+          });
+          candidateList.appendChild(card);
+        });
+        content.appendChild(candidateList);
+
+        const evidenceHeading = document.createElement("h3");
+        evidenceHeading.textContent = "Price evidence";
+        content.appendChild(evidenceHeading);
+        intake.candidates.forEach((candidate) => candidate.price_evidence.forEach((evidence) => {
+          const label = document.createElement("label");
+          label.className = "evidence-row";
+          const checkbox = document.createElement("input");
+          checkbox.type = "checkbox";
+          checkbox.dataset.evidenceId = evidence.id;
+          const text = document.createElement("span");
+          text.textContent = `${evidence.title} — ${evidence.currency} ${Number(evidence.amount).toFixed(2)} · ${candidate.source_name}`;
+          label.append(checkbox, text);
+          content.appendChild(label);
+        }));
+
+        const apply = document.createElement("button");
+        apply.type = "button";
+        apply.className = "button button-primary";
+        apply.textContent = "Use checked fields in draft form";
+        apply.addEventListener("click", () => applyIntakeSuggestions(intake));
+        content.appendChild(apply);
+      }
+
+      const discard = document.createElement("button");
+      discard.type = "button";
+      discard.className = "button button-danger";
+      discard.textContent = "Discard intake";
+      discard.addEventListener("click", async () => {
+        if (!window.confirm("Discard this intake and permanently delete its staged photos?")) return;
+        try {
+          await api(`/api/admin/intakes/${encodeURIComponent(intake.id)}`, { method: "DELETE" });
+          if ($("item-intake-id").value === intake.id) resetItemForm();
+          ui.activeIntake = null;
+          await refreshData();
+          content.replaceChildren();
+          $("intake-review-meta").textContent = "Intake discarded.";
+          notify("Staged intake and photos deleted.");
+        } catch (error) { notify(error.message, true); }
+      });
+      const actions = document.createElement("div");
+      actions.className = "intake-actions";
+      actions.appendChild(discard);
+      content.appendChild(actions);
+    }
+
+    async function openIntake(intakeId) {
+      try {
+        const intake = await api(`/api/admin/intakes/${encodeURIComponent(intakeId)}`);
+        ui.activeIntake = intake;
+        renderIntakeReview(intake);
+      } catch (error) { notify(error.message, true); }
+    }
+
+    function applyIntakeSuggestions(intake) {
+      const selected = [...$("intake-review-content").querySelectorAll("input[data-field-name]:checked")];
+      if (!selected.length) { notify("Select at least one suggested field first.", true); return; }
+      resetItemForm();
+      ui.activeIntake = intake;
+      ui.selectedFieldSources = {};
+      selected.forEach((checkbox) => {
+        const candidate = intake.candidates.find((row) => row.id === checkbox.dataset.candidateId);
+        const field = checkbox.dataset.fieldName;
+        if (!candidate || !field || !(field in candidate.fields) || !$(field)) return;
+        $(field).value = candidate.fields[field];
+        ui.selectedFieldSources[field] = candidate.id;
+      });
+      $("item-intake-id").value = intake.id;
+      $("item-legend").textContent = "Review staged item";
+      $("save-item").textContent = "Create private draft";
+      $("is_published").checked = false;
+      $("is_published").disabled = true;
+      showView("inventory");
+      $("item-editor-panel").scrollIntoView({ behavior: "smooth", block: "start" });
+      notify("Review every field, set condition and asking price, then create the private draft.");
+    }
+
     async function refreshData() {
-      const [items, categories, events] = await Promise.all([
-        api("/api/admin/items"), api("/api/admin/categories"), api("/api/admin/events"),
+      const [items, categories, events, intakes, providers, backupStatus] = await Promise.all([
+        api("/api/admin/items"), api("/api/admin/categories"), api("/api/admin/events"), api("/api/admin/intakes"),
+        api("/api/admin/intake-providers"), api("/api/admin/backups/status"),
       ]);
       ui.items = items;
       ui.categories = categories;
       ui.events = events;
+      ui.intakes = intakes;
+      ui.providers = providers;
+      ui.backupStatus = backupStatus;
       renderCategoryOptions();
       renderItems();
       renderEvents();
+      renderIntakeList();
+      $("backup-server-status").textContent = backupStatus.detail;
+      $("save-server-backup").disabled = !backupStatus.available;
     }
 
     function resetItemForm() {
       $("item-form").reset();
       $("item-id").value = "";
+      $("item-intake-id").value = "";
+      ui.activeIntake = null;
+      ui.selectedFieldSources = {};
       $("item-legend").textContent = "Add an item";
       $("quantity").value = 1;
       $("reserved_quantity").value = 0;
       $("sold_quantity").value = 0;
       $("asking_price").value = 0;
+      $("is_published").disabled = false;
       if (ui.categories.length) $("category").value = ui.categories[0];
       $("save-item").textContent = "Save item";
     }
 
     function editItem(item) {
+      ui.activeIntake = null;
+      ui.selectedFieldSources = {};
+      $("item-intake-id").value = "";
+      $("is_published").disabled = false;
       $("item-id").value = item.id;
       fieldNames.forEach((name) => {
         if ($(name).type === "checkbox") $(name).checked = item[name];
@@ -616,6 +1030,16 @@
     $("new-item-button").addEventListener("click", () => { resetItemForm(); $("item-editor-panel").scrollIntoView({ behavior: "smooth", block: "start" }); $("name").focus({ preventScroll: true }); });
     $("cancel-edit").addEventListener("click", resetItemForm);
     $("reset").addEventListener("click", resetItemForm);
+    $("save-server-backup").addEventListener("click", async () => {
+      if (!window.confirm("Create a new server backup and replace the existing items-for-sale-backup.zip?")) return;
+      const button = $("save-server-backup");
+      button.disabled = true;
+      try {
+        const result = await api("/api/admin/backups/server", { method: "POST" });
+        notify(`Server backup saved as ${result.filename}.`);
+      } catch (error) { notify(error.message, true); }
+      finally { button.disabled = !ui.backupStatus?.available; }
+    });
     $("item-search").addEventListener("input", renderItems);
     $("item-category-filter").addEventListener("change", renderItems);
     $("item-status-filter").addEventListener("change", renderItems);
@@ -630,16 +1054,69 @@
         else item[name] = $(name).value;
       });
       const id = $("item-id").value;
+      const intakeId = $("item-intake-id").value;
       $("save-item").disabled = true;
       try {
-        await api(id ? `/api/admin/items/${encodeURIComponent(id)}` : "/api/admin/items", {
-          method: id ? "PATCH" : "POST", body: JSON.stringify(item),
-        });
+        if (intakeId) {
+          const selectedEvidence = [...$("intake-review-content").querySelectorAll("input[data-evidence-id]:checked")]
+            .map((input) => input.dataset.evidenceId);
+          await api(`/api/admin/intakes/${encodeURIComponent(intakeId)}/create-draft`, {
+            method: "POST",
+            body: JSON.stringify({
+              item,
+              selected_field_sources: ui.selectedFieldSources,
+              selected_evidence_ids: selectedEvidence,
+            }),
+          });
+        } else {
+          await api(id ? `/api/admin/items/${encodeURIComponent(id)}` : "/api/admin/items", {
+            method: id ? "PATCH" : "POST", body: JSON.stringify(item),
+          });
+        }
         await refreshData();
         resetItemForm();
-        notify(id ? "Item changes saved." : "Item added to inventory.");
+        notify(intakeId ? "Private inventory draft created from intake." : id ? "Item changes saved." : "Item added to inventory.");
       } catch (error) { notify(error.message, true); }
       finally { $("save-item").disabled = false; }
+    });
+
+    $("intake-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const files = [
+        ...[...$("intake-product-files").files].map((file) => ({ file, kind: "product" })),
+        ...[...$("intake-package-files").files].map((file) => ({ file, kind: "package" })),
+        ...[...$("intake-barcode-files").files].map((file) => ({ file, kind: "barcode" })),
+      ];
+      const barcode = $("intake-barcode").value.trim();
+      const manufacturerPartNumber = $("intake-manufacturer-part-number").value.trim();
+      if (!barcode && !manufacturerPartNumber && !files.length) {
+        notify("Enter a barcode or manufacturer part number, or select at least one photo.", true);
+        return;
+      }
+      if (files.some(({ file }) => file.size > 10 * 1024 * 1024)) {
+        notify("Each photo must be smaller than 10 MB.", true);
+        return;
+      }
+      $("start-intake").disabled = true;
+      try {
+        const intake = await api("/api/admin/intakes", {
+          method: "POST",
+          body: JSON.stringify({ barcode, manufacturer_part_number: manufacturerPartNumber }),
+        });
+        for (const { file, kind } of files) {
+          const form = new FormData();
+          form.append("file", file);
+          form.append("kind", kind);
+          await api(`/api/admin/intakes/${encodeURIComponent(intake.id)}/photos`, { method: "POST", body: form });
+        }
+        $("intake-form").reset();
+        await refreshData();
+        await openIntake(intake.id);
+        notify("Intake staged privately. No external service was contacted.");
+      } catch (error) {
+        await refreshData();
+        notify(`Could not finish staging this intake: ${error.message}`, true);
+      } finally { $("start-intake").disabled = false; }
     });
 
     $("photo-form").addEventListener("submit", async (event) => {

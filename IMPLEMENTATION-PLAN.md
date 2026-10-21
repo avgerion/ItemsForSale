@@ -56,16 +56,23 @@ Create a small, phone-friendly inventory app for retail-return items. The owner 
 
 **Exit:** An owner can manually add and update an item, publish it, and a buyer can find it in the catalog.
 
-### 2. Add assisted identification and price research
+### 2. Add assisted intake, identification, and price research
 
-- Evaluate image-capable identification and product/barcode lookup providers.
-- Return proposed product name, brand/model, category, identifiers, and source links for owner review.
-- Read barcode images where possible; retain manual identifier entry as a fallback.
-- Research original retail and resale-market evidence separately; distinguish active listings from completed sales.
-- Store lookup provider/source and retrieval date; surface ambiguity, unavailable results, and errors.
-- Let the owner accept, correct, or discard each suggestion.
+- Add a scan-first intake workspace where an owner/helper can stage product, packaging, and barcode photos before creating a permanent inventory item. Staged photos remain private and can be removed or expire if the intake is abandoned.
+- Accept a manually entered or corrected barcode and manufacturer part number (MPN) independently. Keep MPN distinct from the product's model field, and carry both identifiers into a private draft.
+- Let the owner choose which staged photos and barcode/identifier to send to external providers. Do not send private notes, storage locations, account data, or unrelated photos.
+- Let the owner select one provider method per run. Preserve prior candidates so vision, OCR, product catalogs, and pricing research can be run sequentially after the owner reviews or corrects identifiers.
+- Read a UPC/EAN from a barcode image where possible using local barcode/OCR software, and allow manual correction or entry. Treat OCR and vision-extracted identifiers as unverified until confirmed.
+- Use a replaceable provider adapter for image-capable models and product/barcode catalogs. Candidate providers include Google Gemini, OpenAI vision models, GroqCloud, UPCitemdb, and UPCDatabase.org. Keep provider and model identifiers configurable rather than hard-coding a model name whose availability may change.
+- Use one vision provider for the normal identification pass. Make a second model an optional fallback or explicit comparison, not an automatic call for every intake.
+- Query barcode catalogs using the confirmed or proposed UPC/EAN. Permit independent provider failures and rate limits; a failed or unavailable service must not discard the staged intake or block manual entry.
+- Search eBay separately for active listings and, if access is approved, sold-item evidence. Label active asking prices distinctly from completed-sale prices; do not present either as guaranteed retail value or as the owner's asking price.
+- Return results in an owner-review list. Each candidate should identify its provider/source and include available product name, brand/model, identifiers, category, description, product link, price amount/type/currency, retrieval date, and confidence or match rationale. Show conflicting and low-confidence results clearly; do not invent missing values.
+- Allow selecting, correcting, or ignoring suggestions field by field and selecting which price evidence to keep. Preserve the chosen source, URL/identifier, price type, currency, and lookup date with accepted evidence.
+- Create an unpublished draft only after the owner confirms the desired fields. The owner remains responsible for condition, quantity, physical storage location, and garage-sale asking price. Never auto-publish or replace the asking price with a provider's estimate.
+- Keep provider credentials server-side, use timeouts and bounded retries, respect each provider's terms and rate limits, and report provider errors visibly. Do not expose credentials or unrestricted raw provider responses to the browser.
 
-**Exit:** Lookups help the owner complete an item record without automatically asserting facts or publishing it.
+**Exit:** An owner can stage photos, compare independently sourced identification and price candidates in a selectable review list, and create a private draft from only the information they approve. Provider failures leave manual intake available; nothing is silently accepted or published.
 
 ### 3. Prepare the catalog for buyers
 
@@ -97,6 +104,8 @@ Start with Milestone 1. Keep the first slice manual: an authenticated owner/help
 - **Inventory listing:** Product name, brand/model and identifier when known; category; description; condition; total quantity; reserved quantity; sold quantity; remaining available quantity; availability; asking price; private notes; created/updated timestamps. Keep quantity changes consistent; derive remaining quantity rather than maintaining conflicting counts.
 - **Photos:** Item, package, and barcode images associated with a listing. Private by default; only owner-selected product photos are exposed in public listings.
 - **Price evidence:** Retail or resale estimate kept separately from asking price, with amount, source/link, evidence type, and lookup date. Optional in the first manual-only slice.
+- **Assisted intake:** A private, temporary intake record for staged photos and submitted identifiers, separate from permanent inventory. Retain enough provider/source and result metadata to review candidates, show errors, and record selected evidence; expire or delete abandoned intake data according to a documented retention rule.
+- **Identification and price candidates:** Keep provider results as reviewable candidates rather than treating them as item facts. Store source/provider, retrieval time, confidence or match notes when available, product link, and typed price evidence (for example, retail reference, active listing, or completed sale). Only owner-approved values move to the draft item or its price-evidence records.
 - **Storage location:** Private hierarchical location, such as room → shelf → bin. Never include this field in public responses.
 - **Sale details:** Multiple owner-managed sale events, each with dates and public location details. Publish an event's exact address only during that event's active window. Contact actions open the buyer's SMS/email app with a prefilled message including the item name and catalog link. Keep contact details out of the public page when not configured.
 - **Publication:** Draft/published state is separate from availability. Public results include published `Available` and `Reserved` listings with their status labeled; `Sold` and `Hidden` records remain in private inventory.
@@ -117,6 +126,17 @@ Start with Milestone 1. Keep the first slice manual: an authenticated owner/help
 5. Add focused tests for publication rules, reserved/available quantity consistency, image visibility, private-field exclusion, sale-address date gating, and catalog search/filtering.
 6. Manually verify the workflows on a desktop and phone-sized viewport.
 
+### Assisted intake implementation order
+
+Status: Steps 1–5 now have an initial implementation: private staging, sequential live-provider review, manually editable UPC/MPN, explicit selected-photo vision calls, local barcode/OCR, product catalogs, and active eBay listing evidence. Live integrations still require owner-supplied credentials and local Tesseract installation; they have only been exercised with mocked responses, not against live accounts.
+
+1. [x] Define temporary intake and candidate-result boundaries, retention/cleanup behavior, private photo handling, and typed price-evidence fields before connecting external providers.
+2. [x] Build the scan-first staging and review UI; verify that provider candidates are selectable, editable, dismissible, and never create or publish inventory without confirmation.
+3. [x] Add local barcode/OCR extraction with owner confirmation; add UPCitemdb and UPCDatabase.org adapters and show their results as separate sources, including rate-limit and no-match states.
+4. [x] Add configurable Gemini, OpenAI, and GroqCloud vision providers; require explicit photo selection for each call and run only the owner-selected model.
+5. [x] Add eBay active-listing comparisons, clearly labeled as asking prices. Completed/sold history remains unavailable unless official restricted access is granted.
+6. [ ] Test provider timeouts, invalid credentials, rate limits, conflicting candidates, no matches, abandoned intake cleanup, and that secrets/private fields never reach public responses.
+
 ## Decisions to revisit before internet deployment
 
 - Which sign-in provider and helper invite/revocation flow will be used?
@@ -133,4 +153,9 @@ Start with Milestone 1. Keep the first slice manual: an authenticated owner/help
 - Search and filters work on both desktop and phone-sized screens.
 - Missing or uncertain identification/pricing never becomes a fabricated fact.
 - An owner can edit suggestions, recover from lookup errors, and manually enter an item.
+- Staged photos and lookup results are private, and an owner can choose which photos leave the home server for a provider request.
+- Product identification, retail references, active eBay asking prices, completed-sale evidence, and the owner's asking price remain clearly distinct.
+- Provider candidates cannot alter permanent inventory, the owner's asking price, or publication status without explicit owner selection and confirmation.
+- A provider timeout, rate limit, or no-match result does not lose staged intake or prevent manual item creation.
+- Each live provider call is an explicit single-method action; photo uploads to cloud models include only photos checked for that run.
 - Private notes, credentials, and admin functions are not exposed to public visitors.
