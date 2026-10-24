@@ -74,11 +74,34 @@ def test_admin_can_download_database_and_all_photo_directories(client, admin_hea
     database.INTAKE_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     (database.UPLOAD_DIR / "item-photo.jpg").write_bytes(b"item-photo")
     (database.INTAKE_UPLOAD_DIR / "staged-photo.jpg").write_bytes(b"staged-photo")
+    with database.connect_db() as connection:
+        connection.execute(
+            """
+            INSERT INTO item_photos(id, item_id, kind, filename, media_type, created_at)
+            VALUES (?, ?, 'product', 'item-photo.jpg', 'image/jpeg', '2026-01-01T00:00:00+00:00')
+            """,
+            ("owner-photo", item["id"]),
+        )
+        connection.execute(
+            """
+            INSERT INTO assisted_intakes(id, owner_username, created_at, expires_at)
+            VALUES ('owner-intake', 'owner', '2026-01-01T00:00:00+00:00', ?)
+            """,
+            (2_000_000_000,),
+        )
+        connection.execute(
+            """
+            INSERT INTO assisted_intake_photos(
+                id, intake_id, kind, filename, media_type, created_at
+            ) VALUES ('staged-photo', 'owner-intake', 'package', 'staged-photo.jpg',
+                      'image/jpeg', '2026-01-01T00:00:00+00:00')
+            """
+        )
 
     response = client.get("/api/admin/backups/download", headers=admin_headers)
     assert response.status_code == 200
     assert response.headers["content-type"] == "application/zip"
-    assert "items-for-sale-backup-" in response.headers["content-disposition"]
+    assert "items-for-sale-owner-backup-" in response.headers["content-disposition"]
 
     archive_path = tmp_path / "download.zip"
     archive_path.write_bytes(response.content)
@@ -113,7 +136,7 @@ def test_server_backup_requires_mounted_configured_directory_and_replaces_zip(
 
     server_usb = tmp_path / "server-usb"
     server_usb.mkdir()
-    existing_backup = server_usb / "items-for-sale-backup.zip"
+    existing_backup = server_usb / "items-for-sale-owner-backup.zip"
     existing_backup.write_bytes(b"old backup")
     monkeypatch.setenv("INVENTORY_BACKUP_DIR", str(server_usb))
 
@@ -135,6 +158,8 @@ def test_backup_endpoints_require_admin(client, admin_headers):
 
 
 def test_database_upgrade_adds_manufacturer_part_number_columns(tmp_path, monkeypatch):
+    monkeypatch.setenv("INVENTORY_USERS", "")
+    monkeypatch.setattr(database, "DEFAULT_OWNER", "owner")
     monkeypatch.setattr(database, "DATA_DIR", tmp_path)
     monkeypatch.setattr(database, "DB_PATH", tmp_path / "inventory.sqlite3")
     monkeypatch.setattr(database, "UPLOAD_DIR", tmp_path / "uploads")
@@ -155,9 +180,249 @@ def test_database_upgrade_adds_manufacturer_part_number_columns(tmp_path, monkey
             assert "manufacturer_part_number" in columns
 
 
+def test_legacy_category_uniqueness_migrates_without_breaking_item_references(tmp_path, monkeypatch):
+    monkeypatch.setenv("INVENTORY_USERS", "")
+    monkeypatch.setattr(database, "DEFAULT_OWNER", "owner")
+    monkeypatch.setattr(database, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(database, "DB_PATH", tmp_path / "inventory.sqlite3")
+    monkeypatch.setattr(database, "UPLOAD_DIR", tmp_path / "uploads")
+    monkeypatch.setattr(database, "INTAKE_UPLOAD_DIR", tmp_path / "intake")
+    with sqlite3.connect(database.DB_PATH) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute(
+            "CREATE TABLE categories (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE NOCASE)"
+        )
+        connection.execute("INSERT INTO categories(id, name) VALUES (7, 'Lighting')")
+        connection.execute(
+            "CREATE TABLE items (id TEXT PRIMARY KEY, category_id INTEGER REFERENCES categories(id))"
+        )
+        connection.execute("INSERT INTO items(id, category_id) VALUES ('existing-item', 7)")
+
+    database.initialize_database()
+
+    with database.connect_db() as connection:
+        connection.execute(
+            "INSERT INTO categories(owner_username, name) VALUES ('seller', 'Lighting')"
+        )
+        assert connection.execute(
+            "SELECT owner_username FROM categories WHERE id = 7"
+        ).fetchone()[0] == "owner"
+        assert connection.execute(
+            "SELECT category_id FROM items WHERE id = 'existing-item'"
+        ).fetchone()[0] == 7
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_database_initialization_creates_category_sets_for_configured_workspaces(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(database, "DB_PATH", tmp_path / "inventory.sqlite3")
+    monkeypatch.setattr(database, "UPLOAD_DIR", tmp_path / "uploads")
+    monkeypatch.setattr(database, "INTAKE_UPLOAD_DIR", tmp_path / "intake")
+    monkeypatch.setenv("INVENTORY_USERS", json.dumps({"owner": "hash", "seller": "hash"}))
+    monkeypatch.setattr(database, "DEFAULT_OWNER", "owner")
+
+    database.initialize_database()
+
+    with database.connect_db() as connection:
+        for username in ("owner", "seller"):
+            categories = connection.execute(
+                "SELECT name FROM categories WHERE owner_username = ? ORDER BY name", (username,)
+            ).fetchall()
+            assert [row["name"] for row in categories] == ["Home", "Lighting", "Tools"]
+
+
 def test_admin_fails_closed_until_accounts_are_configured(client):
     assert client.get("/manage").status_code == 503
     assert client.get("/api/admin/items").status_code == 503
+
+
+def test_owner_workspaces_are_isolated_and_agents_can_edit_granted_workspaces(
+    client, admin_headers, monkeypatch
+):
+    seller_password = "seller password for testing 2026"
+    agent_password = "agent password for testing 2026"
+    monkeypatch.setenv(
+        "INVENTORY_USERS",
+        json.dumps(
+            {
+                "owner": hash_password("correct horse battery staple 2026"),
+                "seller": hash_password(seller_password),
+                "agent": hash_password(agent_password),
+            }
+        ),
+    )
+    monkeypatch.setenv("INVENTORY_AGENT_OWNERS", json.dumps({"agent": ["seller"]}))
+    owner_headers = admin_headers
+    seller_headers = {
+        "Authorization": "Basic "
+        + base64.b64encode(f"seller:{seller_password}".encode()).decode()
+    }
+    agent_headers = {
+        "Authorization": "Basic "
+        + base64.b64encode(f"agent:{agent_password}".encode()).decode()
+    }
+
+    owner_item = create_item(client, owner_headers, name="Owner-only item")
+    for name in ("Lighting", "Tools", "Home"):
+        assert client.post(
+            "/api/admin/categories", headers=seller_headers, json={"name": name}
+        ).status_code == 201
+    seller_item = create_item(client, seller_headers, name="Seller-only item")
+    assert client.post(
+        "/api/admin/categories", headers=seller_headers, json={"name": "Seller custom"}
+    ).status_code == 201
+    owner_intake = client.post("/api/admin/intakes", headers=owner_headers, json={}).json()
+    seller_intake = client.post("/api/admin/intakes", headers=seller_headers, json={}).json()
+    owner_event = {
+        "title": "Owner sale",
+        "starts_at": "2027-01-02T10:00:00Z",
+        "ends_at": "2027-01-02T14:00:00Z",
+        "address": "Owner private address",
+    }
+    seller_event = {**owner_event, "title": "Seller sale", "address": "Seller private address"}
+    assert client.post("/api/admin/events", headers=owner_headers, json=owner_event).status_code == 201
+    assert client.post("/api/admin/events", headers=seller_headers, json=seller_event).status_code == 201
+    image_bytes = io.BytesIO()
+    Image.new("RGB", (2, 2), color="red").save(image_bytes, format="JPEG")
+    uploaded_photo = client.post(
+        f"/api/admin/items/{seller_item['id']}/photos",
+        headers=seller_headers,
+        data={"kind": "product", "is_public": "true"},
+        files={"file": ("seller.jpg", image_bytes.getvalue(), "image/jpeg")},
+    )
+    assert uploaded_photo.status_code == 201
+    seller_photo_id = uploaded_photo.json()["id"]
+
+    assert [row["id"] for row in client.get("/api/admin/items", headers=owner_headers).json()] == [
+        owner_item["id"]
+    ]
+    assert [row["id"] for row in client.get("/api/admin/items", headers=seller_headers).json()] == [
+        seller_item["id"]
+    ]
+    assert client.get("/api/admin/categories", headers=owner_headers).json() == ["Home", "Lighting", "Tools"]
+    assert client.get("/api/admin/categories", headers=seller_headers).json() == [
+        "Home",
+        "Lighting",
+        "Seller custom",
+        "Tools",
+    ]
+    assert [row["id"] for row in client.get("/api/admin/intakes", headers=owner_headers).json()] == [
+        owner_intake["id"]
+    ]
+    assert [row["id"] for row in client.get("/api/admin/intakes", headers=seller_headers).json()] == [
+        seller_intake["id"]
+    ]
+    assert client.get(
+        f"/api/admin/intakes/{seller_intake['id']}", headers=owner_headers
+    ).status_code == 404
+    assert [row["title"] for row in client.get("/api/admin/events", headers=owner_headers).json()] == [
+        "Owner sale"
+    ]
+    assert [row["title"] for row in client.get("/api/admin/events", headers=seller_headers).json()] == [
+        "Seller sale"
+    ]
+    assert client.get(
+        "/api/admin/items",
+        headers={**owner_headers, "X-Inventory-Owner": "seller"},
+    ).status_code == 404
+    assert client.get("/api/admin/workspaces", headers=agent_headers).json() == [
+        {"username": "agent"},
+        {"username": "seller"},
+    ]
+    agent_workspace_headers = {**agent_headers, "X-Inventory-Owner": "seller"}
+    assert [row["id"] for row in client.get("/api/admin/items", headers=agent_workspace_headers).json()] == [
+        seller_item["id"]
+    ]
+    assert client.get(
+        f"/api/admin/intakes/{seller_intake['id']}", headers=agent_workspace_headers
+    ).status_code == 200
+    updated = client.patch(
+        f"/api/admin/items/{seller_item['id']}",
+        headers=agent_workspace_headers,
+        json={"private_notes": "Updated by the assigned agent"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["private_notes"] == "Updated by the assigned agent"
+    assert client.patch(
+        f"/api/admin/items/{owner_item['id']}",
+        headers=agent_workspace_headers,
+        json={"private_notes": "Must not cross workspace"},
+    ).status_code == 404
+    assert client.get(
+        f"/api/admin/photos/{seller_photo_id}?owner=seller",
+        headers=owner_headers,
+    ).status_code == 404
+    assert client.get(
+        f"/api/admin/photos/{seller_photo_id}?owner=seller",
+        headers=agent_workspace_headers,
+    ).status_code == 200
+    assert client.get(f"/media/{seller_photo_id}?owner=owner").status_code == 404
+    assert client.get(f"/media/{seller_photo_id}?owner=seller").status_code == 200
+
+    owner_catalog = client.get("/api/public/items", params={"owner": "owner"}).json()
+    seller_catalog = client.get("/api/public/items", params={"owner": "seller"}).json()
+    assert [row["name"] for row in owner_catalog] == ["Owner-only item"]
+    assert [row["name"] for row in seller_catalog] == ["Seller-only item"]
+    assert [row["title"] for row in client.get("/api/public/events", params={"owner": "owner"}).json()] == [
+        "Owner sale"
+    ]
+    assert [row["title"] for row in client.get("/api/public/events", params={"owner": "seller"}).json()] == [
+        "Seller sale"
+    ]
+    assert "Owner-only item" not in client.get("/catalog/seller").text
+    assert "Seller-only item" in client.get("/catalog/seller").text
+
+
+def test_workspace_backup_excludes_other_users_inventory(client, admin_headers, monkeypatch, tmp_path):
+    seller_password = "seller password for testing 2026"
+    monkeypatch.setenv(
+        "INVENTORY_USERS",
+        json.dumps({"owner": hash_password("correct horse battery staple 2026"), "seller": hash_password(seller_password)}),
+    )
+    owner_item = create_item(client, admin_headers, name="Owner backup item")
+    image_bytes = io.BytesIO()
+    Image.new("RGB", (2, 2), color="blue").save(image_bytes, format="JPEG")
+    owner_photo = client.post(
+        f"/api/admin/items/{owner_item['id']}/photos",
+        headers=admin_headers,
+        data={"kind": "product", "is_public": "false"},
+        files={"file": ("owner.jpg", image_bytes.getvalue(), "image/jpeg")},
+    )
+    assert owner_photo.status_code == 201
+    seller_headers = {
+        "Authorization": "Basic "
+        + base64.b64encode(f"seller:{seller_password}".encode()).decode()
+    }
+    for name in ("Lighting", "Tools", "Home"):
+        assert client.post(
+            "/api/admin/categories", headers=seller_headers, json={"name": name}
+        ).status_code == 201
+    create_item(client, seller_headers, name="Seller private backup item")
+    seller_item = client.get("/api/admin/items", headers=seller_headers).json()[0]
+    seller_photo = client.post(
+        f"/api/admin/items/{seller_item['id']}/photos",
+        headers=seller_headers,
+        data={"kind": "product", "is_public": "false"},
+        files={"file": ("seller.jpg", image_bytes.getvalue(), "image/jpeg")},
+    )
+    assert seller_photo.status_code == 201
+
+    response = client.get("/api/admin/backups/download", headers=admin_headers)
+    assert response.status_code == 200
+    archive_path = tmp_path / "owner-backup.zip"
+    archive_path.write_bytes(response.content)
+    with zipfile.ZipFile(archive_path) as archive:
+        assert json.loads(archive.read("backup-info.json"))["workspace"] == "owner"
+        assert "uploads/" + owner_photo.json()["id"] + ".jpg" in archive.namelist()
+        assert "uploads/" + seller_photo.json()["id"] + ".jpg" not in archive.namelist()
+        database_path = tmp_path / "owner-backup.sqlite3"
+        database_path.write_bytes(archive.read("inventory.sqlite3"))
+    with sqlite3.connect(database_path) as restored:
+        names = restored.execute("SELECT name FROM items ORDER BY name").fetchall()
+        assert names == [("Owner backup item",)]
+        assert restored.execute("SELECT COUNT(*) FROM admin_sessions").fetchone() == (0,)
+        assert restored.execute("SELECT username FROM admin_sessions").fetchall() == []
+    assert owner_item["name"] == "Owner backup item"
 
 
 def test_admin_page_redirects_to_login_when_accounts_are_configured(client, admin_headers):

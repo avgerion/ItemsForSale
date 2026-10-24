@@ -89,6 +89,8 @@ Create a small, phone-friendly inventory app for retail-return items. The owner 
 ### 4. Deploy and improve
 
 - Configure deployment, automated local backups, secrets, and access protection for owner/helper operations.
+- Keep each configured user's inventory, photos, intake records, categories, and sale events in a private workspace; only explicitly configured agents may access another user's workspace.
+- Provide a separate public catalog per user and ensure workspace backups cannot reveal other users' records.
 - Test restoring both the database and uploaded photos from backup.
 - Test the full workflow, public/private data boundaries, and recovery from lookup failures.
 - Use real inventory feedback to prioritize bulk intake, additional providers, or operational features.
@@ -97,11 +99,11 @@ Create a small, phone-friendly inventory app for retail-return items. The owner 
 
 ## First implementation slice
 
-Start with Milestone 1. Keep the first slice manual: an authenticated owner/helper can add an item, attach photos, set its condition and asking price, publish it, and find it through the public catalog. This validates the data model and buyer experience before adding AI or paid/external integrations.
+Start with Milestone 1. Keep the first slice manual: an authenticated user can add an item, attach photos, set its condition and asking price, publish it, and find it through that user's public catalog. An agent relationship grants only the explicitly configured owner's workspace. This validates the data model and buyer experience before adding AI or paid/external integrations.
 
 ### Suggested v1 data boundaries
 
-- **Inventory listing:** Product name, brand/model and identifier when known; category; description; condition; total quantity; reserved quantity; sold quantity; remaining available quantity; availability; asking price; private notes; created/updated timestamps. Keep quantity changes consistent; derive remaining quantity rather than maintaining conflicting counts.
+- **Inventory listing:** Product name, brand/model and identifier when known; owner/workspace; category; description; condition; total quantity; reserved quantity; sold quantity; remaining available quantity; availability; asking price; private notes; created/updated timestamps. Keep quantity changes consistent; derive remaining quantity rather than maintaining conflicting counts.
 - **Photos:** Item, package, and barcode images associated with a listing. Private by default; only owner-selected product photos are exposed in public listings.
 - **Price evidence:** Retail or resale estimate kept separately from asking price, with amount, source/link, evidence type, and lookup date. Optional in the first manual-only slice.
 - **Assisted intake:** A private, temporary intake record for staged photos and submitted identifiers, separate from permanent inventory. Retain enough provider/source and result metadata to review candidates, show errors, and record selected evidence; expire or delete abandoned intake data according to a documented retention rule.

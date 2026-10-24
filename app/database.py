@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import time
@@ -12,15 +13,19 @@ DATA_DIR = Path(os.environ.get("INVENTORY_DATA_DIR", DEFAULT_DATA_DIR)).resolve(
 DB_PATH = Path(os.environ.get("INVENTORY_DB_PATH", DATA_DIR / "inventory.sqlite3")).resolve()
 UPLOAD_DIR = Path(os.environ.get("INVENTORY_UPLOAD_DIR", DATA_DIR / "uploads")).resolve()
 INTAKE_UPLOAD_DIR = Path(os.environ.get("INVENTORY_INTAKE_DIR", DATA_DIR / "intake")).resolve()
+DEFAULT_OWNER = os.environ.get("INVENTORY_DEFAULT_OWNER", "owner").strip()
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS categories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE COLLATE NOCASE
+    owner_username TEXT NOT NULL,
+    name TEXT NOT NULL COLLATE NOCASE,
+    UNIQUE(owner_username, name)
 );
 
 CREATE TABLE IF NOT EXISTS items (
     id TEXT PRIMARY KEY,
+    owner_username TEXT NOT NULL,
     name TEXT NOT NULL,
     brand TEXT NOT NULL DEFAULT '',
     model TEXT NOT NULL DEFAULT '',
@@ -54,6 +59,7 @@ CREATE TABLE IF NOT EXISTS item_photos (
 
 CREATE TABLE IF NOT EXISTS sale_events (
     id TEXT PRIMARY KEY,
+    owner_username TEXT NOT NULL,
     title TEXT NOT NULL,
     starts_at TEXT NOT NULL,
     ends_at TEXT NOT NULL,
@@ -72,6 +78,7 @@ CREATE TABLE IF NOT EXISTS admin_sessions (
 
 CREATE TABLE IF NOT EXISTS assisted_intakes (
     id TEXT PRIMARY KEY,
+    owner_username TEXT NOT NULL,
     barcode TEXT NOT NULL DEFAULT '',
     manufacturer_part_number TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
@@ -139,11 +146,26 @@ def connect_db() -> Iterator[sqlite3.Connection]:
 
 
 def initialize_database() -> None:
+    if not DEFAULT_OWNER:
+        raise RuntimeError("INVENTORY_DEFAULT_OWNER must be a configured username")
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     INTAKE_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     with connect_db() as connection:
         connection.executescript(SCHEMA)
+        for table_name in ("categories", "items", "sale_events", "assisted_intakes"):
+            existing_columns = {
+                row["name"] for row in connection.execute(f"PRAGMA table_info({table_name})")
+            }
+            if "owner_username" not in existing_columns:
+                connection.execute(
+                    f"ALTER TABLE {table_name} ADD COLUMN owner_username TEXT NOT NULL DEFAULT ''"
+                )
+            connection.execute(
+                f"UPDATE {table_name} SET owner_username = ? WHERE owner_username = ''",
+                (DEFAULT_OWNER,),
+            )
+        _rebuild_categories_with_workspace_uniqueness(connection)
         for table_name in ("items", "assisted_intakes"):
             existing_columns = {
                 row["name"] for row in connection.execute(f"PRAGMA table_info({table_name})")
@@ -152,11 +174,72 @@ def initialize_database() -> None:
                 connection.execute(
                     f"ALTER TABLE {table_name} ADD COLUMN manufacturer_part_number TEXT NOT NULL DEFAULT ''"
                 )
+        raw_users = os.environ.get("INVENTORY_USERS", "")
+        try:
+            configured_users = json.loads(raw_users) if raw_users else {}
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("INVENTORY_USERS must be valid JSON before the database can initialize") from exc
+        if not isinstance(configured_users, dict) or any(
+            not isinstance(username, str) for username in configured_users
+        ):
+            raise RuntimeError("INVENTORY_USERS must be a JSON object keyed by usernames")
+        configured_usernames = list(configured_users)
+        if configured_usernames and DEFAULT_OWNER not in configured_users:
+            raise RuntimeError("INVENTORY_DEFAULT_OWNER must name an account in INVENTORY_USERS")
+        owners = list(dict.fromkeys([DEFAULT_OWNER, *configured_usernames]))
         connection.executemany(
-            "INSERT OR IGNORE INTO categories(name) VALUES (?)",
-            [("Lighting",), ("Tools",), ("Home",)],
+            "INSERT OR IGNORE INTO categories(owner_username, name) VALUES (?, ?)",
+            [(owner, name) for owner in owners for name in ("Lighting", "Tools", "Home")],
+        )
+        item_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(items)")
+        }
+        if "updated_at" in item_columns:
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_items_owner_updated ON items(owner_username, updated_at)"
+            )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_intakes_owner_expiry ON assisted_intakes(owner_username, expires_at)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_events_owner_start ON sale_events(owner_username, starts_at)"
         )
     purge_expired_intakes()
+
+
+def _rebuild_categories_with_workspace_uniqueness(connection: sqlite3.Connection) -> None:
+    for index in connection.execute("PRAGMA index_list(categories)").fetchall():
+        if not index["unique"]:
+            continue
+        columns = [
+            row["name"] for row in connection.execute(f"PRAGMA index_info({index['name']})").fetchall()
+        ]
+        if columns != ["name"]:
+            continue
+
+        connection.commit()
+        connection.execute("PRAGMA foreign_keys = OFF")
+        connection.execute(
+            """
+            CREATE TABLE categories_replacement (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_username TEXT NOT NULL,
+                name TEXT NOT NULL COLLATE NOCASE,
+                UNIQUE(owner_username, name)
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO categories_replacement(id, owner_username, name)
+            SELECT id, owner_username, name FROM categories
+            """
+        )
+        connection.execute("DROP TABLE categories")
+        connection.execute("ALTER TABLE categories_replacement RENAME TO categories")
+        connection.commit()
+        connection.execute("PRAGMA foreign_keys = ON")
+        break
 
 
 def purge_expired_intakes(now_epoch: int | None = None) -> None:

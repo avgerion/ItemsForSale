@@ -66,6 +66,36 @@ def configured_users() -> dict[str, str]:
     return users
 
 
+def configured_agent_owners() -> dict[str, list[str]]:
+    raw_access = os.environ.get("INVENTORY_AGENT_OWNERS", "")
+    if not raw_access:
+        return {}
+    try:
+        access = json.loads(raw_access)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("INVENTORY_AGENT_OWNERS must be a JSON object mapping agents to owner usernames") from exc
+    if not isinstance(access, dict):
+        raise RuntimeError("INVENTORY_AGENT_OWNERS must be a JSON object mapping agents to owner usernames")
+
+    users = configured_users()
+    validated: dict[str, list[str]] = {}
+    for agent, owners in access.items():
+        if (
+            not isinstance(agent, str)
+            or agent not in users
+            or not isinstance(owners, list)
+            or any(not isinstance(owner, str) or owner not in users or owner == agent for owner in owners)
+            or len(set(owners)) != len(owners)
+        ):
+            raise RuntimeError("INVENTORY_AGENT_OWNERS contains an invalid agent or owner mapping")
+        validated[agent] = owners
+    return validated
+
+
+def accessible_owners(username: str) -> list[str]:
+    return list(dict.fromkeys([username, *configured_agent_owners().get(username, [])]))
+
+
 def create_session_token(username: str) -> str:
     token = secrets.token_urlsafe(32)
     expires_at = int(time.time()) + SESSION_TTL_SECONDS

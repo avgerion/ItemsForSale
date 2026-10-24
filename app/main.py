@@ -38,13 +38,14 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from starlette.background import BackgroundTask
 
 from .backups import configured_backup_directory, create_inventory_backup, save_server_backup
-from .database import INTAKE_UPLOAD_DIR, UPLOAD_DIR, connect_db, initialize_database, purge_expired_intakes
+from .database import DEFAULT_OWNER, INTAKE_UPLOAD_DIR, UPLOAD_DIR, connect_db, initialize_database, purge_expired_intakes
 from .providers import ProviderError, provider_statuses, run_provider
 from .security import (
     SESSION_COOKIE,
     SESSION_TTL_SECONDS,
     AdminLoginRequired,
     configured_users,
+    accessible_owners,
     create_session_token,
     hash_password,
     require_admin,
@@ -200,9 +201,20 @@ def money_from_cents(value: int) -> float:
     return value / 100
 
 
-def category_id(connection: sqlite3.Connection, name: str) -> int:
+def workspace_owner(username: str, request: Request) -> str:
+    return authorized_workspace(username, request.headers.get("x-inventory-owner", username))
+
+
+def authorized_workspace(username: str, owner: str) -> str:
+    if owner not in accessible_owners(username):
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    return owner
+
+
+def category_id(connection: sqlite3.Connection, name: str, owner_username: str) -> int:
     row = connection.execute(
-        "SELECT id FROM categories WHERE name = ? COLLATE NOCASE", (name.strip(),)
+        "SELECT id FROM categories WHERE name = ? COLLATE NOCASE AND owner_username = ?",
+        (name.strip(), owner_username),
     ).fetchone()
     if row is None:
         raise HTTPException(status_code=422, detail="Choose a category from the managed category list")
@@ -259,13 +271,13 @@ def item_record(row: sqlite3.Row, *, include_private: bool) -> dict:
     return record
 
 
-def intake_record(connection: sqlite3.Connection, intake_id: str) -> dict:
+def intake_record(connection: sqlite3.Connection, intake_id: str, owner_username: str) -> dict:
     intake = connection.execute(
         """
         SELECT id, barcode, manufacturer_part_number, created_at, expires_at
-        FROM assisted_intakes WHERE id = ? AND expires_at > ?
+        FROM assisted_intakes WHERE id = ? AND owner_username = ? AND expires_at > ?
         """,
-        (intake_id, int(time.time())),
+        (intake_id, owner_username, int(time.time())),
     ).fetchone()
     if intake is None:
         raise HTTPException(status_code=404, detail="Intake not found or expired")
@@ -311,7 +323,7 @@ def intake_record(connection: sqlite3.Connection, intake_id: str) -> dict:
                 "kind": photo["kind"],
                 "media_type": photo["media_type"],
                 "created_at": photo["created_at"],
-                "url": f"/api/admin/intakes/{intake_id}/photos/{photo['id']}",
+                "url": f"/api/admin/intakes/{intake_id}/photos/{photo['id']}?owner={quote(owner_username, safe='')}",
             }
             for photo in photos
         ],
@@ -319,15 +331,15 @@ def intake_record(connection: sqlite3.Connection, intake_id: str) -> dict:
     }
 
 
-def fetch_item(connection: sqlite3.Connection, item_id: str) -> sqlite3.Row:
+def fetch_item(connection: sqlite3.Connection, item_id: str, owner_username: str) -> sqlite3.Row:
     row = connection.execute(
         """
         SELECT items.*, categories.name AS category
         FROM items
         JOIN categories ON categories.id = items.category_id
-        WHERE items.id = ?
+        WHERE items.id = ? AND items.owner_username = ?
         """,
-        (item_id,),
+        (item_id, owner_username),
     ).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="Item not found")
@@ -337,25 +349,27 @@ def fetch_item(connection: sqlite3.Connection, item_id: str) -> sqlite3.Row:
 def insert_inventory_item(
     connection: sqlite3.Connection,
     item: ItemCreate,
+    owner_username: str,
     *,
     is_published: bool | None = None,
 ) -> tuple[str, dict]:
     now = timestamp()
     item_id = str(uuid.uuid4())
-    cat_id = category_id(connection, item.category)
+    cat_id = category_id(connection, item.category, owner_username)
     availability = normalize_availability(
         item.availability, item.quantity, item.reserved_quantity, item.sold_quantity
     )
     connection.execute(
         """
         INSERT INTO items (
-            id, name, brand, model, manufacturer_part_number, barcode, category_id, description, condition,
+            id, owner_username, name, brand, model, manufacturer_part_number, barcode, category_id, description, condition,
             quantity, reserved_quantity, sold_quantity, availability, asking_price_cents,
             private_notes, storage_location, is_published, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             item_id,
+            owner_username,
             item.name,
             item.brand,
             item.model,
@@ -376,16 +390,17 @@ def insert_inventory_item(
             now,
         ),
     )
-    return item_id, item_record(fetch_item(connection, item_id), include_private=True)
+    return item_id, item_record(fetch_item(connection, item_id, owner_username), include_private=True)
 
 
-def public_items(search: str = "", category: str = "") -> list[dict]:
+def public_items(owner_username: str, search: str = "", category: str = "") -> list[dict]:
     clauses = [
         "items.is_published = 1",
         "items.availability IN ('available', 'reserved')",
         "(items.quantity - items.reserved_quantity - items.sold_quantity) > 0",
     ]
-    parameters: list[str] = []
+    clauses.append("items.owner_username = ?")
+    parameters: list[str] = [owner_username]
     if search.strip():
         clauses.append(
             "(items.name LIKE ? COLLATE NOCASE OR items.brand LIKE ? COLLATE NOCASE "
@@ -419,18 +434,20 @@ def public_items(search: str = "", category: str = "") -> list[dict]:
                 """,
                 (row["id"],),
             ).fetchall()
-            listing["photo_urls"] = [f"/media/{photo['id']}" for photo in photos]
+            listing["photo_urls"] = [
+                f"/media/{photo['id']}?owner={quote(owner_username, safe='')}" for photo in photos
+            ]
             result.append(listing)
     return result
 
 
-def public_events() -> list[dict]:
+def public_events(owner_username: str) -> list[dict]:
     now = utc_now()
     now_text = timestamp(now)
     with connect_db() as connection:
         rows = connection.execute(
-            "SELECT * FROM sale_events WHERE ends_at >= ? ORDER BY starts_at",
-            (now_text,),
+            "SELECT * FROM sale_events WHERE owner_username = ? AND ends_at >= ? ORDER BY starts_at",
+            (owner_username, now_text),
         ).fetchall()
     events = []
     for row in rows:
@@ -448,6 +465,13 @@ def public_events() -> list[dict]:
             }
         )
     return events
+
+
+def public_catalog_url(owner_username: str) -> str:
+    base_url = os.environ.get("PUBLIC_CATALOG_URL", "").rstrip("/")
+    if not base_url:
+        return ""
+    return f"{base_url}/catalog/{quote(owner_username, safe='')}"
 
 
 @asynccontextmanager
@@ -551,37 +575,54 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/api/admin/workspaces")
+def list_workspaces(username: Annotated[str, Depends(require_admin)]) -> list[dict[str, str]]:
+    return [{"username": owner} for owner in accessible_owners(username)]
+
+
+def validate_public_owner(owner_username: str) -> str:
+    if owner_username != DEFAULT_OWNER and owner_username not in configured_users():
+        raise HTTPException(status_code=404, detail="Catalog not found")
+    return owner_username
+
+
 @app.get("/api/public/items")
 def list_public_items(
+    owner: Annotated[str, Query(min_length=1, max_length=120)] = DEFAULT_OWNER,
     q: Annotated[str, Query(max_length=200)] = "",
     category: Annotated[str, Query(max_length=80)] = "",
 ) -> list[dict]:
-    return public_items(q, category)
+    return public_items(validate_public_owner(owner), q, category)
 
 
 @app.get("/api/public/categories")
-def list_public_categories() -> list[str]:
+def list_public_categories(owner: Annotated[str, Query(min_length=1, max_length=120)] = DEFAULT_OWNER) -> list[str]:
+    owner = validate_public_owner(owner)
     with connect_db() as connection:
         rows = connection.execute(
             """
             SELECT DISTINCT categories.name
             FROM categories JOIN items ON items.category_id = categories.id
-            WHERE items.is_published = 1
+            WHERE items.owner_username = ?
+              AND categories.owner_username = ?
+              AND items.is_published = 1
               AND items.availability IN ('available', 'reserved')
               AND (items.quantity - items.reserved_quantity - items.sold_quantity) > 0
             ORDER BY categories.name COLLATE NOCASE
-            """
+            """,
+            (owner, owner),
         ).fetchall()
     return [row["name"] for row in rows]
 
 
 @app.get("/api/public/events")
-def list_public_events() -> list[dict]:
-    return public_events()
+def list_public_events(owner: Annotated[str, Query(min_length=1, max_length=120)] = DEFAULT_OWNER) -> list[dict]:
+    return public_events(validate_public_owner(owner))
 
 
 @app.get("/media/{photo_id}")
-def public_photo(photo_id: str) -> Response:
+def public_photo(photo_id: str, owner: Annotated[str, Query(min_length=1, max_length=120)] = DEFAULT_OWNER) -> Response:
+    owner = validate_public_owner(owner)
     with connect_db() as connection:
         row = connection.execute(
             """
@@ -590,11 +631,12 @@ def public_photo(photo_id: str) -> Response:
             WHERE item_photos.id = ?
               AND item_photos.kind = 'product'
               AND item_photos.is_public = 1
+              AND items.owner_username = ?
               AND items.is_published = 1
               AND items.availability IN ('available', 'reserved')
               AND (items.quantity - items.reserved_quantity - items.sold_quantity) > 0
             """,
-            (photo_id,),
+            (photo_id, owner),
         ).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="Photo not found")
@@ -607,11 +649,20 @@ def public_photo(photo_id: str) -> Response:
 
 
 @app.get("/api/admin/photos/{photo_id}")
-def private_photo(photo_id: str, _: Annotated[str, Depends(require_admin)]) -> Response:
+def private_photo(
+    photo_id: str,
+    username: Annotated[str, Depends(require_admin)],
+    owner_username: Annotated[str | None, Query(alias="owner", min_length=1, max_length=120)] = None,
+) -> Response:
+    owner = authorized_workspace(username, owner_username or username)
     with connect_db() as connection:
         row = connection.execute(
-            "SELECT filename, media_type FROM item_photos WHERE id = ?",
-            (photo_id,),
+            """
+            SELECT item_photos.filename, item_photos.media_type
+            FROM item_photos JOIN items ON items.id = item_photos.item_id
+            WHERE item_photos.id = ? AND items.owner_username = ?
+            """,
+            (photo_id, owner),
         ).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="Photo not found")
@@ -623,9 +674,15 @@ def private_photo(photo_id: str, _: Annotated[str, Depends(require_admin)]) -> R
 
 
 @app.get("/", response_class=HTMLResponse)
-def catalog_page() -> str:
-    listings = public_items()
-    events = public_events()
+def default_catalog_page() -> str:
+    return catalog_page(DEFAULT_OWNER)
+
+
+@app.get("/catalog/{owner_username:path}", response_class=HTMLResponse)
+def catalog_page(owner_username: str) -> str:
+    owner_username = validate_public_owner(owner_username)
+    listings = public_items(owner_username)
+    events = public_events(owner_username)
     categories = ["All categories", *sorted({item["category"] for item in listings}, key=str.casefold)]
     names = [item["name"] for item in listings]
     photo = [
@@ -641,7 +698,7 @@ def catalog_page() -> str:
     )
     for item in listings:
         links = []
-        catalog_url = os.environ.get("PUBLIC_CATALOG_URL", "").rstrip("/")
+        catalog_url = public_catalog_url(owner_username)
         message = f"Hi, I'm interested in {item['name']}."
         if catalog_url:
             message += f" Browse: {catalog_url}"
@@ -731,7 +788,7 @@ def catalog_page() -> str:
         end = html.escape(event["ends_at"][:16].replace("T", " "))
         address = f"<p><strong>Address:</strong> {html.escape(event['address'])}</p>" if event["address"] else ""
         event_contacts = []
-        catalog_url = os.environ.get("PUBLIC_CATALOG_URL", "").rstrip("/")
+        catalog_url = public_catalog_url(owner_username)
         event_message = f"Hi, I'm interested in the garage sale: {event['title']}."
         if catalog_url:
             event_message += f" Browse the catalog: {catalog_url}"
@@ -783,14 +840,15 @@ def management_page(_: Annotated[str, Depends(require_admin)]) -> HTMLResponse:
 
 
 @app.get("/api/admin/intakes")
-def list_intakes(_: Annotated[str, Depends(require_admin)]) -> list[dict]:
+def list_intakes(request: Request, username: Annotated[str, Depends(require_admin)]) -> list[dict]:
     purge_expired_intakes()
+    owner = workspace_owner(username, request)
     with connect_db() as connection:
         rows = connection.execute(
-            "SELECT id FROM assisted_intakes WHERE expires_at > ? ORDER BY created_at DESC",
-            (int(time.time()),),
+            "SELECT id FROM assisted_intakes WHERE owner_username = ? AND expires_at > ? ORDER BY created_at DESC",
+            (owner, int(time.time())),
         ).fetchall()
-        return [intake_record(connection, row["id"]) for row in rows]
+        return [intake_record(connection, row["id"], owner) for row in rows]
 
 
 @app.get("/api/admin/intake-providers")
@@ -838,18 +896,24 @@ def _remove_temporary_backup(path: str) -> None:
 
 
 @app.get("/api/admin/backups/download")
-def download_backup(_: Annotated[str, Depends(require_admin)]) -> FileResponse:
+def download_backup(
+    username: Annotated[str, Depends(require_admin)],
+    owner_username: Annotated[str | None, Query(alias="owner", min_length=1, max_length=120)] = None,
+) -> FileResponse:
+    owner_username = owner_username or username
+    if owner_username not in accessible_owners(username):
+        raise HTTPException(status_code=404, detail="Workspace not found")
     file_descriptor, filename = tempfile.mkstemp(prefix="items-for-sale-backup-", suffix=".zip")
     os.close(file_descriptor)
     try:
-        create_inventory_backup(Path(filename))
+        create_inventory_backup(Path(filename), owner_username=owner_username)
     except (OSError, sqlite3.Error) as exc:
         _remove_temporary_backup(filename)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"Could not create backup: {exc}",
         ) from exc
-    download_name = f"items-for-sale-backup-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}.zip"
+    download_name = f"items-for-sale-{owner_username}-backup-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}.zip"
     return FileResponse(
         filename,
         media_type="application/zip",
@@ -859,12 +923,16 @@ def download_backup(_: Annotated[str, Depends(require_admin)]) -> FileResponse:
 
 
 @app.post("/api/admin/backups/server")
-def create_server_backup(_: Annotated[str, Depends(require_admin)]) -> dict[str, str]:
+def create_server_backup(
+    request: Request,
+    username: Annotated[str, Depends(require_admin)],
+) -> dict[str, str]:
+    owner = workspace_owner(username, request)
     try:
         backup_dir = configured_backup_directory()
         if backup_dir is None:
             raise ValueError("Set INVENTORY_BACKUP_DIR before saving a backup to the server.")
-        destination = save_server_backup(backup_dir)
+        destination = save_server_backup(backup_dir, owner_username=owner)
     except (OSError, sqlite3.Error, ValueError) as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -876,51 +944,58 @@ def create_server_backup(_: Annotated[str, Depends(require_admin)]) -> dict[str,
 @app.post("/api/admin/intakes", status_code=status.HTTP_201_CREATED)
 def create_intake(
     intake: IntakeCreate,
-    _: Annotated[str, Depends(require_admin)],
+    request: Request,
+    username: Annotated[str, Depends(require_admin)],
 ) -> dict:
     purge_expired_intakes()
+    owner = workspace_owner(username, request)
     intake_id = str(uuid.uuid4())
     created = utc_now()
     expires = int(time.time()) + 48 * 60 * 60
     with connect_db() as connection:
         connection.execute(
             """
-            INSERT INTO assisted_intakes(id, barcode, manufacturer_part_number, created_at, expires_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO assisted_intakes(id, owner_username, barcode, manufacturer_part_number, created_at, expires_at)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
                 intake_id,
+                owner,
                 intake.barcode,
                 intake.manufacturer_part_number,
                 timestamp(created),
                 expires,
             ),
         )
-        return intake_record(connection, intake_id)
+        return intake_record(connection, intake_id, owner)
 
 
 @app.get("/api/admin/intakes/{intake_id}")
 def get_intake(
     intake_id: str,
-    _: Annotated[str, Depends(require_admin)],
+    request: Request,
+    username: Annotated[str, Depends(require_admin)],
 ) -> dict:
     purge_expired_intakes()
+    owner = workspace_owner(username, request)
     with connect_db() as connection:
-        return intake_record(connection, intake_id)
+        return intake_record(connection, intake_id, owner)
 
 
 @app.patch("/api/admin/intakes/{intake_id}")
 def update_intake(
     intake_id: str,
     update: IntakeUpdate,
-    _: Annotated[str, Depends(require_admin)],
+    request: Request,
+    username: Annotated[str, Depends(require_admin)],
 ) -> dict:
     purge_expired_intakes()
+    owner = workspace_owner(username, request)
     changes = update.model_dump(exclude_unset=True)
     if not changes:
         raise HTTPException(status_code=422, detail="Provide a barcode or manufacturer part number to update")
     with connect_db() as connection:
-        existing = intake_record(connection, intake_id)
+        existing = intake_record(connection, intake_id, owner)
         barcode = changes.get("barcode", existing["barcode"])
         manufacturer_part_number = changes.get(
             "manufacturer_part_number", existing["manufacturer_part_number"]
@@ -931,25 +1006,33 @@ def update_intake(
             """
             UPDATE assisted_intakes
             SET barcode = ?, manufacturer_part_number = ?
-            WHERE id = ?
+            WHERE id = ? AND owner_username = ?
             """,
-            (barcode, manufacturer_part_number, intake_id),
+            (barcode, manufacturer_part_number, intake_id, owner),
         )
-        return intake_record(connection, intake_id)
+        return intake_record(connection, intake_id, owner)
 
 
 @app.delete("/api/admin/intakes/{intake_id}", status_code=status.HTTP_204_NO_CONTENT)
 def discard_intake(
     intake_id: str,
-    _: Annotated[str, Depends(require_admin)],
+    request: Request,
+    username: Annotated[str, Depends(require_admin)],
 ) -> Response:
     purge_expired_intakes()
+    owner = workspace_owner(username, request)
     with connect_db() as connection:
         photos = connection.execute(
-            "SELECT filename FROM assisted_intake_photos WHERE intake_id = ?",
-            (intake_id,),
+            """
+            SELECT assisted_intake_photos.filename FROM assisted_intake_photos
+            JOIN assisted_intakes ON assisted_intakes.id = assisted_intake_photos.intake_id
+            WHERE intake_id = ? AND assisted_intakes.owner_username = ?
+            """,
+            (intake_id, owner),
         ).fetchall()
-        result = connection.execute("DELETE FROM assisted_intakes WHERE id = ?", (intake_id,))
+        result = connection.execute(
+            "DELETE FROM assisted_intakes WHERE id = ? AND owner_username = ?", (intake_id, owner)
+        )
         if result.rowcount == 0:
             raise HTTPException(status_code=404, detail="Intake not found")
     for photo in photos:
@@ -960,11 +1043,13 @@ def discard_intake(
 @app.post("/api/admin/intakes/{intake_id}/photos", status_code=status.HTTP_201_CREATED)
 async def upload_intake_photo(
     intake_id: str,
-    _: Annotated[str, Depends(require_admin)],
+    request: Request,
+    username: Annotated[str, Depends(require_admin)],
     file: Annotated[UploadFile, File()],
     kind: Annotated[PhotoKind, Form()],
 ) -> dict:
     purge_expired_intakes()
+    owner = workspace_owner(username, request)
     payload = await read_valid_image(file)
     INTAKE_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     photo_id = str(uuid.uuid4())
@@ -972,7 +1057,7 @@ async def upload_intake_photo(
     filename = f"{photo_id}{extension}"
     destination = INTAKE_UPLOAD_DIR / filename
     with connect_db() as connection:
-        intake_record(connection, intake_id)
+        intake_record(connection, intake_id, owner)
         destination.write_bytes(payload)
         try:
             connection.execute(
@@ -998,16 +1083,21 @@ async def upload_intake_photo(
 def get_intake_photo(
     intake_id: str,
     photo_id: str,
-    _: Annotated[str, Depends(require_admin)],
+    username: Annotated[str, Depends(require_admin)],
+    owner_username: Annotated[str | None, Query(alias="owner", min_length=1, max_length=120)] = None,
 ) -> Response:
     purge_expired_intakes()
+    owner = authorized_workspace(username, owner_username or username)
     with connect_db() as connection:
         photo = connection.execute(
             """
-            SELECT filename, media_type FROM assisted_intake_photos
-            WHERE id = ? AND intake_id = ?
+            SELECT assisted_intake_photos.filename, assisted_intake_photos.media_type
+            FROM assisted_intake_photos
+            JOIN assisted_intakes ON assisted_intakes.id = assisted_intake_photos.intake_id
+            WHERE assisted_intake_photos.id = ? AND assisted_intake_photos.intake_id = ?
+              AND assisted_intakes.owner_username = ?
             """,
-            (photo_id, intake_id),
+            (photo_id, intake_id, owner),
         ).fetchone()
         if photo is None:
             raise HTTPException(status_code=404, detail="Intake photo not found")
@@ -1021,45 +1111,47 @@ def get_intake_photo(
 @app.post("/api/admin/intakes/{intake_id}/lookup")
 def lookup_intake(
     intake_id: str,
-    _: Annotated[str, Depends(require_admin)],
-    request: IntakeLookup,
+    lookup: IntakeLookup,
+    request: Request,
+    username: Annotated[str, Depends(require_admin)],
 ) -> dict:
     purge_expired_intakes()
+    owner = workspace_owner(username, request)
     retrieved_at = timestamp()
     with connect_db() as connection:
-        intake = intake_record(connection, intake_id)
+        intake = intake_record(connection, intake_id, owner)
         has_identifier = bool(intake["barcode"] or intake["manufacturer_part_number"])
-        if request.photo_ids and request.method not in {
+        if lookup.photo_ids and lookup.method not in {
             "vision_gemini",
             "vision_openai",
             "vision_groqcloud",
             "barcode_local",
         }:
             raise HTTPException(status_code=422, detail="This provider method does not accept photos.")
-        if request.method in {"vision_gemini", "vision_openai", "vision_groqcloud"} and not request.photo_ids:
+        if lookup.method in {"vision_gemini", "vision_openai", "vision_groqcloud"} and not lookup.photo_ids:
             raise HTTPException(status_code=422, detail="Select at least one photo before a vision run")
-        if request.method == "vision_groqcloud" and len(request.photo_ids) > 3:
+        if lookup.method == "vision_groqcloud" and len(lookup.photo_ids) > 3:
             raise HTTPException(status_code=422, detail="Select no more than 3 photos for a GroqCloud vision run")
-        if request.method in {"upcitemdb", "upcdatabase", "ebay_active"} and not has_identifier:
+        if lookup.method in {"upcitemdb", "upcdatabase", "ebay_active"} and not has_identifier:
             raise HTTPException(
                 status_code=422,
                 detail="Enter a barcode or manufacturer part number before this lookup",
             )
 
         selected_photos: list[tuple[str, bytes, str]] = []
-        if request.photo_ids:
-            if len(set(request.photo_ids)) != len(request.photo_ids):
+        if lookup.photo_ids:
+            if len(set(lookup.photo_ids)) != len(lookup.photo_ids):
                 raise HTTPException(status_code=422, detail="A photo can only be selected once per provider run")
-            placeholders = ",".join("?" for _ in request.photo_ids)
+            placeholders = ",".join("?" for _ in lookup.photo_ids)
             photo_rows = connection.execute(
                 f"""
                 SELECT id, kind, filename, media_type
                 FROM assisted_intake_photos
                 WHERE intake_id = ? AND id IN ({placeholders})
                 """,
-                [intake_id, *request.photo_ids],
+                [intake_id, *lookup.photo_ids],
             ).fetchall()
-            if len(photo_rows) != len(request.photo_ids):
+            if len(photo_rows) != len(lookup.photo_ids):
                 raise HTTPException(status_code=422, detail="A selected photo does not belong to this intake")
             for photo in photo_rows:
                 try:
@@ -1070,7 +1162,7 @@ def lookup_intake(
 
         try:
             generated_candidates = run_provider(
-                request.method,
+                lookup.method,
                 barcode=intake["barcode"],
                 manufacturer_part_number=intake["manufacturer_part_number"],
                 photos=selected_photos,
@@ -1102,16 +1194,18 @@ def lookup_intake(
                     0,
                 ),
             )
-        return intake_record(connection, intake_id)
+        return intake_record(connection, intake_id, owner)
 
 
 @app.post("/api/admin/intakes/{intake_id}/create-draft", status_code=status.HTTP_201_CREATED)
 def create_draft_from_intake(
     intake_id: str,
     request: IntakeFinalize,
-    _: Annotated[str, Depends(require_admin)],
+    http_request: Request,
+    username: Annotated[str, Depends(require_admin)],
 ) -> dict:
     purge_expired_intakes()
+    owner = workspace_owner(username, http_request)
     allowed_fields = {
         "name",
         "brand",
@@ -1131,7 +1225,7 @@ def create_draft_from_intake(
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     try:
         with connect_db() as connection:
-            intake_record(connection, intake_id)
+            intake_record(connection, intake_id, owner)
             candidate_ids = set(request.selected_field_sources.values())
             selected_candidates: dict[str, sqlite3.Row] = {}
             for candidate_id in candidate_ids:
@@ -1166,7 +1260,7 @@ def create_draft_from_intake(
                 if evidence_id not in evidence_by_id:
                     raise HTTPException(status_code=422, detail="Selected price evidence does not belong to this intake")
 
-            item_id, _ = insert_inventory_item(connection, request.item, is_published=False)
+            item_id, _ = insert_inventory_item(connection, request.item, owner, is_published=False)
             for field_name, candidate_id in request.selected_field_sources.items():
                 candidate = selected_candidates[candidate_id]
                 source_value = json.loads(candidate["fields_json"])[field_name]
@@ -1240,7 +1334,7 @@ def create_draft_from_intake(
     for path in staged_files:
         path.unlink(missing_ok=True)
     with connect_db() as connection:
-        item_result = item_record(fetch_item(connection, item_id), include_private=True)
+        item_result = item_record(fetch_item(connection, item_id, owner), include_private=True)
         item_result["photos"] = [
             {
                 "id": row["id"],
@@ -1274,14 +1368,20 @@ def create_draft_from_intake(
 
 
 @app.get("/api/admin/items")
-def list_admin_items(_: Annotated[str, Depends(require_admin)]) -> list[dict]:
+def list_admin_items(
+    request: Request,
+    username: Annotated[str, Depends(require_admin)],
+) -> list[dict]:
+    owner = workspace_owner(username, request)
     with connect_db() as connection:
         rows = connection.execute(
             """
             SELECT items.*, categories.name AS category
             FROM items JOIN categories ON categories.id = items.category_id
+            WHERE items.owner_username = ? AND categories.owner_username = ?
             ORDER BY items.updated_at DESC
-            """
+            """,
+            (owner, owner),
         ).fetchall()
         result = [item_record(row, include_private=True) for row in rows]
         for record in result:
@@ -1342,10 +1442,12 @@ def list_admin_items(_: Annotated[str, Depends(require_admin)]) -> list[dict]:
 @app.post("/api/admin/items", status_code=status.HTTP_201_CREATED)
 def create_item(
     item: ItemCreate,
-    _: Annotated[str, Depends(require_admin)],
+    request: Request,
+    username: Annotated[str, Depends(require_admin)],
 ) -> dict:
+    owner = workspace_owner(username, request)
     with connect_db() as connection:
-        _, record = insert_inventory_item(connection, item)
+        _, record = insert_inventory_item(connection, item, owner)
         return record
 
 
@@ -1353,13 +1455,15 @@ def create_item(
 def update_item(
     item_id: str,
     update: ItemUpdate,
-    _: Annotated[str, Depends(require_admin)],
+    request: Request,
+    username: Annotated[str, Depends(require_admin)],
 ) -> dict:
+    owner = workspace_owner(username, request)
     changes = update.model_dump(exclude_unset=True)
     if not changes:
         raise HTTPException(status_code=422, detail="Provide at least one field to update")
     with connect_db() as connection:
-        existing = fetch_item(connection, item_id)
+        existing = fetch_item(connection, item_id, owner)
         merged = {
             "name": existing["name"],
             "brand": existing["brand"],
@@ -1395,7 +1499,7 @@ def update_item(
             merged["reserved_quantity"],
             merged["sold_quantity"],
         )
-        cat_id = category_id(connection, merged["category"])
+        cat_id = category_id(connection, merged["category"], owner)
         connection.execute(
             """
             UPDATE items SET
@@ -1403,7 +1507,7 @@ def update_item(
                 condition = ?, quantity = ?, reserved_quantity = ?, sold_quantity = ?,
                 availability = ?, asking_price_cents = ?, private_notes = ?, storage_location = ?,
                 is_published = ?, updated_at = ?
-            WHERE id = ?
+            WHERE id = ? AND owner_username = ?
             """,
             (
                 merged["name"],
@@ -1424,36 +1528,48 @@ def update_item(
                 int(bool(merged["is_published"])),
                 timestamp(),
                 item_id,
+                owner,
             ),
         )
-        row = fetch_item(connection, item_id)
+        row = fetch_item(connection, item_id, owner)
     return item_record(row, include_private=True)
 
 
 @app.get("/api/admin/categories")
-def list_admin_categories(_: Annotated[str, Depends(require_admin)]) -> list[str]:
+def list_admin_categories(request: Request, username: Annotated[str, Depends(require_admin)]) -> list[str]:
+    owner = workspace_owner(username, request)
     with connect_db() as connection:
-        rows = connection.execute("SELECT name FROM categories ORDER BY name COLLATE NOCASE").fetchall()
+        rows = connection.execute(
+            "SELECT name FROM categories WHERE owner_username = ? ORDER BY name COLLATE NOCASE",
+            (owner,),
+        ).fetchall()
     return [row["name"] for row in rows]
 
 
 @app.post("/api/admin/categories", status_code=status.HTTP_201_CREATED)
 def create_category(
     category: CategoryCreate,
-    _: Annotated[str, Depends(require_admin)],
+    request: Request,
+    username: Annotated[str, Depends(require_admin)],
 ) -> dict[str, str]:
+    owner = workspace_owner(username, request)
     with connect_db() as connection:
         try:
-            connection.execute("INSERT INTO categories(name) VALUES (?)", (category.name,))
+            connection.execute(
+                "INSERT INTO categories(owner_username, name) VALUES (?, ?)", (owner, category.name)
+            )
         except sqlite3.IntegrityError as exc:
             raise HTTPException(status_code=409, detail="Category already exists") from exc
     return {"name": category.name}
 
 
 @app.get("/api/admin/events")
-def list_admin_events(_: Annotated[str, Depends(require_admin)]) -> list[dict]:
+def list_admin_events(request: Request, username: Annotated[str, Depends(require_admin)]) -> list[dict]:
+    owner = workspace_owner(username, request)
     with connect_db() as connection:
-        rows = connection.execute("SELECT * FROM sale_events ORDER BY starts_at").fetchall()
+        rows = connection.execute(
+            "SELECT * FROM sale_events WHERE owner_username = ? ORDER BY starts_at", (owner,)
+        ).fetchall()
     return [
         {
             "id": row["id"],
@@ -1471,18 +1587,21 @@ def list_admin_events(_: Annotated[str, Depends(require_admin)]) -> list[dict]:
 @app.post("/api/admin/events", status_code=status.HTTP_201_CREATED)
 def create_sale_event(
     event: SaleEventCreate,
-    _: Annotated[str, Depends(require_admin)],
+    request: Request,
+    username: Annotated[str, Depends(require_admin)],
 ) -> dict:
+    owner = workspace_owner(username, request)
     event_id = str(uuid.uuid4())
     with connect_db() as connection:
         connection.execute(
             """
             INSERT INTO sale_events
-            (id, title, starts_at, ends_at, address, contact_phone, contact_email, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (id, owner_username, title, starts_at, ends_at, address, contact_phone, contact_email, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event_id,
+                owner,
                 event.title,
                 timestamp(event.starts_at),
                 timestamp(event.ends_at),
@@ -1492,7 +1611,9 @@ def create_sale_event(
                 timestamp(),
             ),
         )
-        row = connection.execute("SELECT * FROM sale_events WHERE id = ?", (event_id,)).fetchone()
+        row = connection.execute(
+            "SELECT * FROM sale_events WHERE id = ? AND owner_username = ?", (event_id, owner)
+        ).fetchone()
     return {
         "id": row["id"],
         "title": row["title"],
@@ -1505,9 +1626,16 @@ def create_sale_event(
 
 
 @app.delete("/api/admin/events/{event_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_sale_event(event_id: str, _: Annotated[str, Depends(require_admin)]) -> Response:
+def delete_sale_event(
+    event_id: str,
+    request: Request,
+    username: Annotated[str, Depends(require_admin)],
+) -> Response:
+    owner = workspace_owner(username, request)
     with connect_db() as connection:
-        result = connection.execute("DELETE FROM sale_events WHERE id = ?", (event_id,))
+        result = connection.execute(
+            "DELETE FROM sale_events WHERE id = ? AND owner_username = ?", (event_id, owner)
+        )
         if result.rowcount == 0:
             raise HTTPException(status_code=404, detail="Sale event not found")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -1517,15 +1645,30 @@ def delete_sale_event(event_id: str, _: Annotated[str, Depends(require_admin)]) 
 def update_photo_visibility(
     photo_id: str,
     is_public: bool,
-    _: Annotated[str, Depends(require_admin)],
+    request: Request,
+    username: Annotated[str, Depends(require_admin)],
 ) -> dict:
+    owner = workspace_owner(username, request)
     with connect_db() as connection:
-        photo = connection.execute("SELECT kind FROM item_photos WHERE id = ?", (photo_id,)).fetchone()
+        photo = connection.execute(
+            """
+            SELECT item_photos.kind FROM item_photos
+            JOIN items ON items.id = item_photos.item_id
+            WHERE item_photos.id = ? AND items.owner_username = ?
+            """,
+            (photo_id, owner),
+        ).fetchone()
         if photo is None:
             raise HTTPException(status_code=404, detail="Photo not found")
         if is_public and photo["kind"] != "product":
             raise HTTPException(status_code=422, detail="Only product photos can be public")
-        connection.execute("UPDATE item_photos SET is_public = ? WHERE id = ?", (int(is_public), photo_id))
+        connection.execute(
+            """
+            UPDATE item_photos SET is_public = ?
+            WHERE id = ? AND item_id IN (SELECT id FROM items WHERE owner_username = ?)
+            """,
+            (int(is_public), photo_id, owner),
+        )
     return {"id": photo_id, "is_public": is_public}
 
 
@@ -1550,11 +1693,13 @@ async def read_valid_image(file: UploadFile) -> bytes:
 @app.post("/api/admin/items/{item_id}/photos", status_code=status.HTTP_201_CREATED)
 async def upload_item_photo(
     item_id: str,
-    _: Annotated[str, Depends(require_admin)],
+    request: Request,
+    username: Annotated[str, Depends(require_admin)],
     file: Annotated[UploadFile, File()],
     kind: Annotated[PhotoKind, Form()],
     is_public: Annotated[bool, Form()] = False,
 ) -> dict:
+    owner = workspace_owner(username, request)
     if is_public and kind != "product":
         raise HTTPException(status_code=422, detail="Only product photos can be public")
     payload = await read_valid_image(file)
@@ -1565,7 +1710,7 @@ async def upload_item_photo(
     filename = f"{photo_id}{extension}"
     destination = UPLOAD_DIR / filename
     with connect_db() as connection:
-        fetch_item(connection, item_id)
+        fetch_item(connection, item_id, owner)
         destination.write_bytes(payload)
         try:
             connection.execute(
@@ -1583,16 +1728,34 @@ async def upload_item_photo(
         "item_id": item_id,
         "kind": kind,
         "is_public": is_public,
-        "url": f"/media/{photo_id}" if is_public else None,
+        "url": f"/media/{photo_id}?owner={quote(owner, safe='')}" if is_public else None,
     }
 
 
 @app.delete("/api/admin/photos/{photo_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_photo(photo_id: str, _: Annotated[str, Depends(require_admin)]) -> Response:
+def delete_photo(
+    photo_id: str,
+    request: Request,
+    username: Annotated[str, Depends(require_admin)],
+) -> Response:
+    owner = workspace_owner(username, request)
     with connect_db() as connection:
-        row = connection.execute("SELECT filename FROM item_photos WHERE id = ?", (photo_id,)).fetchone()
+        row = connection.execute(
+            """
+            SELECT item_photos.filename FROM item_photos
+            JOIN items ON items.id = item_photos.item_id
+            WHERE item_photos.id = ? AND items.owner_username = ?
+            """,
+            (photo_id, owner),
+        ).fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail="Photo not found")
-        connection.execute("DELETE FROM item_photos WHERE id = ?", (photo_id,))
+        connection.execute(
+            """
+            DELETE FROM item_photos WHERE id = ?
+              AND item_id IN (SELECT id FROM items WHERE owner_username = ?)
+            """,
+            (photo_id, owner),
+        )
         (UPLOAD_DIR / row["filename"]).unlink(missing_ok=True)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

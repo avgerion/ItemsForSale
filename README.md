@@ -31,13 +31,19 @@ Copy the printed JSON object into the `INVENTORY_USERS` line in `.env`, for exam
 
 ```dotenv
 INVENTORY_USERS={"owner":"PASTE_THE_GENERATED_HASH_HERE"}
+INVENTORY_DEFAULT_OWNER=owner
+INVENTORY_AGENT_OWNERS={}
 ```
 
-Do not commit `.env`. To add helpers, generate a hash for each account and include every username/hash pair in the same JSON object. The server must be restarted after changing `.env`.
+Do not commit `.env`. Each username is a separate inventory workspace. Before upgrading an existing database, stop the app and make a database/photo backup. Existing inventory is assigned to `INVENTORY_DEFAULT_OWNER` the first time the ownership migration runs; set it to the account that should keep the current inventory before starting the updated app. Keep owner usernames stable because they identify workspace ownership.
+
+To grant an agent access to another account's workspace, give the agent their own entry in `INVENTORY_USERS`, then map that account to one or more owner usernames. For example, `INVENTORY_AGENT_OWNERS={"helper":["owner"]}` gives `helper` view and edit access to `owner`'s workspace. A user can select their own or a granted workspace in the management page. These grants are configuration-managed, not self-service, and take effect after restarting the server. Do not use the same login for separate people.
+
+Public listings are separate by workspace: the root catalog shows the default owner, and each configured account has a page at `/catalog/<username>`. Only that workspace's explicitly published listings, selected product photos, and sale events appear there. Admin records, staged intake photos, private photos, notes, and storage locations remain private to the owner and configured agents. Backups downloaded or saved from the management page contain only the selected workspace's records and associated photos. Category names are scoped to each workspace.
 
 The owner workspace uses a sign-in page and an HTTP-only, server-side session cookie, so it works in browsers that do not show HTTP Basic Auth prompts. Sessions expire after 12 hours and are revoked when you sign out. Only a hash of each random session token is stored in the SQLite database.
 
-Set `PUBLIC_CATALOG_URL` to the public HTTPS catalog URL when deployed; contact messages include it when configured. Locally, the public page remains usable without this setting.
+Set `PUBLIC_CATALOG_URL` to the public HTTPS catalog base URL when deployed; contact messages include a link to the relevant user's catalog when configured. The root catalog is the default owner's catalog; other users' catalogs are available at `/catalog/<username>`. Locally, the public page remains usable without this setting.
 
 Start the development server in PowerShell:
 
@@ -78,17 +84,19 @@ The `--reload` option is for local development. Do not use the development serve
 
 ### Hosting publicly and HTTPS
 
+For a complete Raspberry Pi deployment procedure with commands for DNS, the router, Uvicorn/systemd, Caddy, production HTTPS, and USB backup storage, see [Raspberry Pi public deployment guide](./RASPBERRY-PI-DEPLOYMENT.md).
+
 An HTTPS **reverse proxy** (for example, Caddy or Nginx) is a web server placed in front of this app. The public DNS name points to your network's public IP; the router forwards HTTPS traffic to the proxy, which obtains/uses a TLS certificate, encrypts the browser-to-server connection, and forwards requests to Uvicorn over a private local connection. Only the proxy should accept public web traffic; keep Uvicorn, the SQLite database, and photo directories inaccessible from the internet. A changing home IP may require dynamic DNS, and carrier-grade NAT may prevent router port-forwarding.
 
 A **secure tunnel** uses a client program on your server to make an outbound connection to a tunnel provider. The provider gives you a public HTTPS address and forwards requests through that connection to your app, so you generally do not open inbound router ports. This can work around carrier-grade NAT, but traffic passes through the tunnel provider, so review its account access controls, logging, privacy, reliability, and terms. Configure the tunnel to reach only the local app and enable any available access restrictions.
 
 Both approaches provide public HTTPS; neither automatically secures the app, installs it as a reliable service, or backs up your data. In `APP_ENV=production`, admin routes reject requests the app sees as non-HTTPS, and auth cookies are marked `Secure`. Configure the proxy/tunnel and Uvicorn's trusted forwarded-protocol handling so the app sees the original HTTPS scheme. Do not trust forwarded headers from arbitrary clients. Verify the public catalog and admin sign-in over HTTPS before setting `APP_ENV=production`, then verify administration still works; never expose the SQLite database, uploads directory, or Uvicorn port directly.
 
-The sign-in form protects the management page and admin API; HTTP Basic credentials remain supported for API clients. Use a strong, unique owner password, keep `.env` private, and restrict administration with the proxy/tunnel access controls where practical. A Raspberry Pi 3 can be a small, low-traffic host, but its limited memory and older CPU make dependency installation, local OCR, image processing, and concurrent traffic slower. Use reliable power and storage, preferably a USB SSD or high-endurance card, and test unattended restarts and backups before relying on it.
+The sign-in form protects the management page and admin API; HTTP Basic credentials remain supported for API clients. Use a strong, unique password for every account, keep `.env` private, and restrict administration with the proxy/tunnel access controls where practical. A Raspberry Pi 3 can be a small, low-traffic host, but its limited memory and older CPU make dependency installation, local OCR, image processing, and concurrent traffic slower. Use reliable power and storage, preferably a USB SSD or high-endurance card, and test unattended restarts and backups before relying on it.
 
 ## Owner workspace
 
-The `/manage` workspace provides an inventory dashboard with listing search and category/status filters, item create/edit and publication controls, private storage notes, photo upload and visibility management, owner-managed categories, garage-sale event scheduling, and assisted intake. Product images can be explicitly published; package/barcode photos remain private. The dashboard and its API are protected by the configured owner/helper accounts.
+The `/manage` workspace provides an inventory dashboard with listing search and category/status filters, item create/edit and publication controls, private storage notes, photo upload and visibility management, owner-managed categories, garage-sale event scheduling, and assisted intake. Product images can be explicitly published; package/barcode photos remain private. The dashboard and its API are protected by the configured accounts. Each account sees only its own workspace unless `INVENTORY_AGENT_OWNERS` explicitly grants access to another user's workspace.
 
 ### Assisted intake and provider integrations
 
@@ -118,10 +126,10 @@ By default, SQLite data and uploads are written to `data/`. `INVENTORY_DATA_DIR`
 
 The signed-in admin workspace has a **Backups** page:
 
-- **Download backup ZIP** creates a consistent SQLite snapshot plus the permanent item photos and private staged intake photos. Your browser downloads the archive to the computer you are using; use the browser's download settings to save it to a USB drive attached to that computer. No `.env` file, credentials, or API keys are included. The archive does contain private notes and unpublished inventory, so protect it like the live database.
-- **Save / replace server backup** writes `items-for-sale-backup.zip` to the directory configured by `INVENTORY_BACKUP_DIR`. Set this to the mounted USB directory on the server (for example, `/mnt/inventory-backups` on Raspberry Pi OS). Create and mount that directory before starting the app; the app intentionally does not create a missing mount point, preventing an absent USB drive from silently filling the Pi's SD card. The app user needs write access. Each save replaces the previous archive atomically; copy older versions elsewhere if you want history.
+- **Download backup ZIP** creates a consistent SQLite snapshot of the selected workspace plus its permanent item photos and private staged intake photos. Your browser downloads the archive to the computer you are using; use the browser's download settings to save it to a USB drive attached to that computer. No `.env` file, credentials, API keys, or login sessions are included. The archive does contain private notes and unpublished inventory, so protect it like the live database.
+- **Save / replace server backup** writes a workspace-specific ZIP, such as `items-for-sale-owner-backup.zip`, to the directory configured by `INVENTORY_BACKUP_DIR`. Set this to the mounted USB directory on the server (for example, `/mnt/inventory-backups` on Raspberry Pi OS). Create and mount that directory before starting the app; the app intentionally does not create a missing mount point, preventing an absent USB drive from silently filling the Pi's SD card. The app user needs write access. Each save replaces that workspace's previous archive atomically; copy older versions elsewhere if you want history.
 
-The archive contains `inventory.sqlite3`, `uploads/`, `intake/`, and `backup-info.json`. To restore, stop the app, extract those entries, and copy the database and photo directories back to the configured data locations while preserving their relative filenames. Back up regularly and verify restoration periodically. A USB drive attached to the same server is convenient but is not off-site disaster recovery; keep another copy somewhere separate.
+Each archive contains a workspace-scoped `inventory.sqlite3`, its associated `uploads/` and `intake/` photos, and `backup-info.json`. Replacing the live database with a workspace archive restores only that user and removes other users' records; do not do this for a multi-user restore. For full multi-user recovery, back up the complete server data directory as described in [the Raspberry Pi deployment guide](./RASPBERRY-PI-DEPLOYMENT.md). Back up regularly and verify restoration periodically. A USB drive attached to the same server is convenient but is not off-site disaster recovery; keep another copy somewhere separate.
 
 ## Inventory behavior
 
