@@ -157,6 +157,72 @@ def test_backup_endpoints_require_admin(client, admin_headers):
     assert client.post("/api/admin/backups/server").status_code == 401
 
 
+def test_system_update_is_disabled_without_deployment_setup(client, admin_headers, monkeypatch, tmp_path):
+    monkeypatch.setattr("app.main.SYSTEM_UPDATE_SUPPORTED", True)
+    monkeypatch.setattr("app.main.SYSTEM_UPDATE_HELPER", tmp_path / "missing-update-helper.py")
+    monkeypatch.setattr("app.main.SYSTEM_UPDATE_SUDO", tmp_path / "missing-sudo")
+
+    status_response = client.get("/api/admin/system/update", headers=admin_headers)
+    assert status_response.status_code == 200
+    assert status_response.json()["enabled"] is False
+    assert client.post("/api/admin/system/update", headers=admin_headers).status_code == 503
+    assert client.post("/api/admin/system/update").status_code == 401
+
+
+def test_system_update_is_owner_only_and_starts_the_fixed_service(
+    client, monkeypatch, tmp_path
+):
+    password = "correct horse battery staple 2026"
+    helper_password = "helper password for tests"
+    monkeypatch.setenv(
+        "INVENTORY_USERS",
+        json.dumps(
+            {
+                "owner": hash_password(password),
+                "helper": hash_password(helper_password),
+            }
+        ),
+    )
+    helper = tmp_path / "update_server.py"
+    helper.write_text("", encoding="utf-8")
+    sudo = tmp_path / "sudo"
+    sudo.write_text("", encoding="utf-8")
+    monkeypatch.setattr("app.main.SYSTEM_UPDATE_SUPPORTED", True)
+    monkeypatch.setattr("app.main.SYSTEM_UPDATE_HELPER", helper)
+    monkeypatch.setattr("app.main.SYSTEM_UPDATE_SUDO", sudo)
+    observed = {}
+
+    def fake_run(command, **kwargs):
+        observed["command"] = command
+        observed["kwargs"] = kwargs
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("app.main.subprocess.run", fake_run)
+    owner_token = base64.b64encode(f"owner:{password}".encode()).decode()
+    helper_token = base64.b64encode(f"helper:{helper_password}".encode()).decode()
+
+    started = client.post(
+        "/api/admin/system/update",
+        headers={"Authorization": f"Basic {owner_token}"},
+    )
+    assert started.status_code == 202
+    assert observed["command"] == [
+        str(sudo),
+        "-n",
+        "/usr/bin/systemctl",
+        "start",
+        "--no-block",
+        "items-for-sale-update.service",
+    ]
+    assert observed["kwargs"]["timeout"] == 10
+
+    denied = client.post(
+        "/api/admin/system/update",
+        headers={"Authorization": f"Basic {helper_token}"},
+    )
+    assert denied.status_code == 403
+
+
 def test_database_upgrade_adds_manufacturer_part_number_columns(tmp_path, monkeypatch):
     monkeypatch.setenv("INVENTORY_USERS", "")
     monkeypatch.setattr(database, "DEFAULT_OWNER", "owner")

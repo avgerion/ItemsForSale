@@ -7,6 +7,10 @@ APP_GROUP=items-for-sale
 DATA_DIR=/var/lib/items-for-sale
 ENV_FILE="$APP_DIR/.env"
 SERVICE_FILE=/etc/systemd/system/items-for-sale.service
+UPDATE_SERVICE_FILE=/etc/systemd/system/items-for-sale-update.service
+UPDATE_HELPER_DIR=/usr/local/lib/items-for-sale
+UPDATE_HELPER="$UPDATE_HELPER_DIR/update_server.py"
+UPDATE_SUDOERS_FILE=/etc/sudoers.d/items-for-sale-update
 
 fail() {
   printf 'Error: %s\n' "$*" >&2
@@ -19,13 +23,16 @@ fail() {
 [[ -f "$APP_DIR/requirements.txt" ]] || fail "requirements.txt is missing from $APP_DIR."
 [[ -f "$APP_DIR/.env.example" ]] || fail ".env.example is missing from $APP_DIR."
 
-for command in adduser addgroup chown chmod curl getent git id install journalctl python3 sed systemctl; do
+for command in adduser addgroup chown chmod curl getent git id install journalctl python3 sed sudo systemctl visudo; do
   command -v "$command" >/dev/null 2>&1 || fail "Required command '$command' is missing. Install the Raspberry Pi OS prerequisites from the deployment guide."
 done
 
 [[ ! -L "$ENV_FILE" ]] || fail "$ENV_FILE must not be a symbolic link."
 [[ ! -L "$APP_DIR/.venv" ]] || fail "$APP_DIR/.venv must not be a symbolic link."
 [[ ! -L "$SERVICE_FILE" ]] || fail "$SERVICE_FILE must not be a symbolic link."
+[[ ! -L "$UPDATE_SERVICE_FILE" ]] || fail "$UPDATE_SERVICE_FILE must not be a symbolic link."
+[[ ! -L "$UPDATE_HELPER_DIR" ]] || fail "$UPDATE_HELPER_DIR must not be a symbolic link."
+[[ ! -L "$UPDATE_SUDOERS_FILE" ]] || fail "$UPDATE_SUDOERS_FILE must not be a symbolic link."
 
 python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' \
   || fail "Python 3.11 or newer is required."
@@ -62,6 +69,46 @@ python3 -m venv "$APP_DIR/.venv"
 chown -R "root:$APP_GROUP" "$APP_DIR"
 chmod -R o-rwx "$APP_DIR"
 
+install -d -o root -g root -m 755 "$UPDATE_HELPER_DIR"
+install -o root -g root -m 755 "$APP_DIR/scripts/update_server.py" "$UPDATE_HELPER"
+
+cat > "$UPDATE_SERVICE_FILE" <<'UNIT'
+[Unit]
+Description=Update Items for Sale from origin/main
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/items-for-sale
+ExecStart=/opt/items-for-sale/.venv/bin/python /usr/local/lib/items-for-sale/update_server.py
+Environment=PYTHONUNBUFFERED=1
+Environment=PIP_NO_CACHE_DIR=1
+TimeoutStartSec=30min
+UMask=0077
+PrivateTmp=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+chmod 644 "$UPDATE_SERVICE_FILE"
+
+temporary_sudoers=$(mktemp /etc/sudoers.d/items-for-sale-update.XXXXXX)
+printf '%s\n' 'items-for-sale ALL=(root) NOPASSWD: /usr/bin/systemctl start --no-block items-for-sale-update.service' > "$temporary_sudoers"
+chmod 440 "$temporary_sudoers"
+if ! visudo -cf "$temporary_sudoers"; then
+  rm -f -- "$temporary_sudoers"
+  fail "Could not validate the system-update sudoers rule."
+fi
+mv -f -- "$temporary_sudoers" "$UPDATE_SUDOERS_FILE"
+
 if [[ ! -e "$SERVICE_FILE" ]]; then
   cat > "$SERVICE_FILE" <<'UNIT'
 [Unit]
@@ -84,11 +131,11 @@ UMask=0077
 WantedBy=multi-user.target
 UNIT
   chmod 644 "$SERVICE_FILE"
-  systemctl daemon-reload
 else
   printf 'Preserving existing systemd unit: %s\n' "$SERVICE_FILE"
 fi
 
+systemctl daemon-reload
 systemctl enable items-for-sale
 
 if [[ "$created_env" == true ]]; then

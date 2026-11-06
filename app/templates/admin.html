@@ -402,6 +402,14 @@
                 <p class="selection-hint">Writes one selected-workspace archive and replaces that workspace's previous copy. The configured directory must already be mounted and writable.</p>
               </div>
             </section>
+            <section class="panel">
+              <div class="panel-head"><div><h2 class="panel-title">Update server</h2><p class="panel-description">Install the latest tested commit from GitHub's main branch on the Raspberry Pi.</p></div></div>
+              <div class="panel-body">
+                <p class="helper" id="system-update-status" role="status">Checking server update support…</p>
+                <button class="button" type="button" id="system-update-button" disabled>Check and install update</button>
+                <p class="selection-hint">Creates a full data backup, updates dependencies, restarts the server, and checks its health. The app will be briefly unavailable. Test locally and push to main before updating.</p>
+              </div>
+            </section>
           </div>
         </section>
       </main>
@@ -409,7 +417,7 @@
   </div>
   <script>
     const $ = (id) => document.getElementById(id);
-    const ui = { items: [], categories: [], events: [], intakes: [], providers: [], backupStatus: null, workspaces: [], workspace: "", activeIntake: null, selectedFieldSources: {}, selectedItem: null, noticeTimer: null };
+    const ui = { items: [], categories: [], events: [], intakes: [], providers: [], backupStatus: null, systemUpdateStatus: null, workspaces: [], workspace: "", activeIntake: null, selectedFieldSources: {}, selectedItem: null, noticeTimer: null };
     const fieldNames = ["name", "category", "brand", "model", "manufacturer_part_number", "barcode", "condition", "quantity", "reserved_quantity", "sold_quantity", "asking_price", "availability", "storage_location", "description", "private_notes", "is_published"];
 
     async function api(url, options = {}) {
@@ -1060,9 +1068,9 @@
     }
 
     async function refreshData() {
-      const [items, categories, events, intakes, providers, backupStatus] = await Promise.all([
+      const [items, categories, events, intakes, providers, backupStatus, systemUpdateStatus] = await Promise.all([
         api("/api/admin/items"), api("/api/admin/categories"), api("/api/admin/events"), api("/api/admin/intakes"),
-        api("/api/admin/intake-providers"), api("/api/admin/backups/status"),
+        api("/api/admin/intake-providers"), api("/api/admin/backups/status"), api("/api/admin/system/update"),
       ]);
       ui.items = items;
       ui.categories = categories;
@@ -1070,12 +1078,41 @@
       ui.intakes = intakes;
       ui.providers = providers;
       ui.backupStatus = backupStatus;
+      ui.systemUpdateStatus = systemUpdateStatus;
       renderCategoryOptions();
       renderItems();
       renderEvents();
       renderIntakeList();
       $("backup-server-status").textContent = backupStatus.detail;
       $("save-server-backup").disabled = !backupStatus.available;
+      renderSystemUpdateStatus();
+    }
+
+    function renderSystemUpdateStatus() {
+      const update = ui.systemUpdateStatus;
+      $("system-update-status").textContent = update?.message || "Server update status is unavailable.";
+      $("system-update-button").disabled = !update?.enabled || !update?.allowed || update.state === "updating";
+      if (update?.updated_at) $("system-update-status").textContent += ` Last checked: ${formatDate(update.updated_at)}.`;
+    }
+
+    async function waitForSystemUpdate() {
+      const deadline = Date.now() + 10 * 60 * 1000;
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+        try {
+          ui.systemUpdateStatus = await api("/api/admin/system/update");
+          renderSystemUpdateStatus();
+          if (ui.systemUpdateStatus.state !== "updating") {
+            notify(ui.systemUpdateStatus.message, ui.systemUpdateStatus.state === "failed");
+            return;
+          }
+        } catch {
+          $("system-update-status").textContent = "The server is restarting. Checking again…";
+        }
+      }
+      $("system-update-status").textContent = "The update is taking longer than expected. Check the server service logs.";
+      $("system-update-button").disabled = false;
+      notify("Update status timed out. Check the server service logs.", true);
     }
 
     async function initializeWorkspaces() {
@@ -1202,6 +1239,20 @@
         notify(`Server backup saved as ${result.filename}.`);
       } catch (error) { notify(error.message, true); }
       finally { button.disabled = !ui.backupStatus?.available; }
+    });
+    $("system-update-button").addEventListener("click", async () => {
+      if (!window.confirm("Check GitHub main and install its latest commit? The server will restart, and a full data backup will be created first.")) return;
+      const button = $("system-update-button");
+      button.disabled = true;
+      try {
+        const result = await api("/api/admin/system/update", { method: "POST" });
+        $("system-update-status").textContent = result.message;
+        notify("System update started.");
+        await waitForSystemUpdate();
+      } catch (error) {
+        notify(error.message, true);
+        button.disabled = !ui.systemUpdateStatus?.enabled || !ui.systemUpdateStatus?.allowed;
+      }
     });
     $("item-search").addEventListener("input", renderItems);
     $("item-category-filter").addEventListener("change", renderItems);

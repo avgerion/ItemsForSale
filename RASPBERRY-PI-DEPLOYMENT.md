@@ -57,7 +57,7 @@ Do not expose SSH or Uvicorn to the public internet as a workaround.
 Install system packages used by Python, Git, and the deployment script:
 
 ```bash
-sudo apt install --yes git python3-venv python3-pip python3-dev build-essential curl
+sudo apt install --yes git python3-venv python3-pip python3-dev build-essential curl sudo
 sudo apt install --yes tesseract-ocr
 ```
 
@@ -71,7 +71,7 @@ cd /opt/items-for-sale
 sudo bash scripts/deploy.sh
 ```
 
-The script creates the `items-for-sale` service account and group, prepares `/var/lib/items-for-sale`, creates `.venv`, installs `requirements.txt`, and installs/enables the systemd service. On first run, it copies `.env.example` to `.env`, sets the persistent data directory, and leaves the service stopped until you configure an owner account. It never replaces an existing `.env` or existing systemd unit.
+The script creates the `items-for-sale` service account and group, prepares `/var/lib/items-for-sale`, creates `.venv`, installs `requirements.txt`, and installs/enables the systemd service. It also installs a separate root-owned updater service and a sudoers rule that lets the app start only that service. The updater pulls only fast-forward changes from `origin/main`; it does not grant the web process general shell or source-tree write access. On first run, the installer copies `.env.example` to `.env`, sets the persistent data directory, and leaves the app service stopped until you configure an owner account. It never replaces an existing `.env` or existing app systemd unit.
 
 The source and virtual environment are root-owned and readable by the service group; the app process cannot modify its code or dependencies. Do not store runtime data or backups inside the source tree. The script does not install or configure Caddy, alter router settings, or set `APP_ENV=production`.
 
@@ -432,16 +432,16 @@ Schedule backups for a low-activity time. SQLite is copied with its online backu
 - Check app logs: `sudo journalctl -u items-for-sale -n 100 --no-pager`.
 - Check proxy/certificate logs: `sudo journalctl -u caddy -n 100 --no-pager`.
 - Check data and USB free space: `df -h /var/lib/items-for-sale /mnt/items-backups`.
-- Update app code and dependencies deliberately. Back up the data directory first, then pull the fast-forward update and run the deployment script, which refreshes the virtual environment and restarts the configured service:
+- To install an update interactively, first test the changes locally, then commit and push them to `main`. Sign in as the configured default owner on the Pi and choose **Backups → Update server**. The updater refuses a dirty or diverged checkout, creates a full archive of the database and photos, fast-forwards to `origin/main`, installs the requirements, restarts the app, and checks `/health`. If `INVENTORY_BACKUP_DIR` is configured, it must already be mounted; otherwise the archive is stored in `/var/lib/items-for-sale/system-update-backups`. Treat these archives as private data. This update action is disabled on local development hosts.
+
+  On an existing Pi installation, the updater service is installed the first time you deploy this version. Pull the code and run the deployment installer once:
 
   ```bash
-  sudo systemctl stop items-for-sale
-  sudo tar -C /var/lib -czf "/mnt/items-backups/items-for-sale-data-before-update-$(date +%Y%m%d-%H%M%S).tar.gz" items-for-sale
-  sudo git -C /opt/items-for-sale pull --ff-only
+  sudo git -C /opt/items-for-sale pull --ff-only origin main
   sudo bash /opt/items-for-sale/scripts/deploy.sh
   ```
 
-  The script does not run `git pull` or replace `.env` or an existing systemd unit. If deployment fails, inspect the app and Caddy logs before making the site public again.
+  If a UI update fails, inspect `sudo journalctl -u items-for-sale-update -n 100 --no-pager` and `sudo journalctl -u items-for-sale -n 100 --no-pager`. The updater records the pre-update archive location in the admin status; it does not automatically roll back an unsuccessful code or database migration.
 - Apply OS and Caddy security updates regularly, and periodically test reboot, USB mount, and restore behavior.
 - If DNS resolves but certificate issuance fails, check DNS A/AAAA records, router forwarding, firewall rules, Caddy logs, correct system time, and whether the ISP blocks inbound traffic.
 - If one hostname works and another fails, check that its A record points to the same public IP, its site block exists, and its backend is running. Use `sudo journalctl -u caddy -n 100 --no-pager` for per-site errors.

@@ -4,10 +4,12 @@ import html
 import hmac
 import io
 import json
+import logging
 import os
 import sqlite3
 import secrets
 import shutil
+import subprocess
 import tempfile
 import time
 import uuid
@@ -52,6 +54,13 @@ from .security import (
     revoke_session,
     verify_password,
 )
+
+logger = logging.getLogger(__name__)
+SYSTEM_UPDATE_HELPER = Path("/usr/local/lib/items-for-sale/update_server.py")
+SYSTEM_UPDATE_STATUS = Path("/run/items-for-sale-update-status.json")
+SYSTEM_UPDATE_SUDO = Path("/usr/bin/sudo")
+SYSTEM_UPDATE_SERVICE = "items-for-sale-update.service"
+SYSTEM_UPDATE_SUPPORTED = os.name == "posix"
 
 Condition = Literal["new_sealed", "open_box", "used_good", "used_fair", "for_parts_untested"]
 Availability = Literal["available", "reserved", "sold", "hidden"]
@@ -951,6 +960,114 @@ def backup_status(_: Annotated[str, Depends(require_admin)]) -> dict[str, str | 
         "available": True,
         "detail": "Server backup directory is mounted and writable.",
     }
+
+
+def system_update_enabled() -> bool:
+    return (
+        SYSTEM_UPDATE_SUPPORTED
+        and SYSTEM_UPDATE_HELPER.is_file()
+        and SYSTEM_UPDATE_SUDO.is_file()
+    )
+
+
+def system_update_status(username: str) -> dict[str, str | bool]:
+    allowed = username == DEFAULT_OWNER
+    if not allowed:
+        return {
+            "enabled": False,
+            "allowed": False,
+            "state": "unavailable",
+            "message": "Only the primary owner can update the server.",
+        }
+    if not system_update_enabled():
+        return {
+            "enabled": False,
+            "allowed": True,
+            "state": "unavailable",
+            "message": "Server updates are available only on the configured Raspberry Pi.",
+        }
+    try:
+        status_data = json.loads(SYSTEM_UPDATE_STATUS.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        status_data = {"state": "idle", "message": "Ready to check GitHub for an update."}
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not read the server update status.",
+        ) from exc
+    if not isinstance(status_data, dict):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The server update status is invalid.",
+        )
+    state = status_data.get("state")
+    if (
+        not isinstance(state, str)
+        or state not in {"idle", "updating", "updated", "no_updates", "failed"}
+        or not isinstance(status_data.get("message", ""), str)
+        or not isinstance(status_data.get("updated_at", ""), str)
+        or not isinstance(status_data.get("commit", ""), str)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The server update status is invalid.",
+        )
+    return {
+        "enabled": True,
+        "allowed": True,
+        "state": state,
+        "message": status_data.get("message", ""),
+        "updated_at": status_data.get("updated_at", ""),
+        "commit": status_data.get("commit", ""),
+    }
+
+
+@app.get("/api/admin/system/update")
+def get_system_update_status(
+    username: Annotated[str, Depends(require_admin)],
+) -> dict[str, str | bool]:
+    return system_update_status(username)
+
+
+@app.post("/api/admin/system/update", status_code=status.HTTP_202_ACCEPTED)
+def start_system_update(
+    username: Annotated[str, Depends(require_admin)],
+) -> dict[str, str]:
+    if username != DEFAULT_OWNER:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only the primary owner can update the server.")
+    if not system_update_enabled():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Server updates are not configured on this machine.",
+        )
+    try:
+        result = subprocess.run(
+            [
+                str(SYSTEM_UPDATE_SUDO),
+                "-n",
+                "/usr/bin/systemctl",
+                "start",
+                "--no-block",
+                SYSTEM_UPDATE_SERVICE,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.exception("Could not start the system updater")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not start the server updater. Check the systemd and sudoers setup.",
+        ) from exc
+    if result.returncode != 0:
+        logger.error("Could not start the system updater: exit code %s", result.returncode)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not start the server updater. Check the systemd and sudoers setup.",
+        )
+    return {"state": "updating", "message": "The server is checking GitHub and will restart if it finds an update."}
 
 
 def _remove_temporary_backup(path: str) -> None:
