@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Annotated, Literal
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from bokeh.embed import components
 from bokeh.models import (
@@ -128,6 +128,8 @@ class IntakeCreate(BaseModel):
 
     barcode: str = Field(default="", max_length=80)
     manufacturer_part_number: str = Field(default="", max_length=120)
+    lowes_product_number: str = Field(default="", max_length=80)
+    home_depot_product_number: str = Field(default="", max_length=80)
 
 
 class IntakeUpdate(BaseModel):
@@ -135,6 +137,8 @@ class IntakeUpdate(BaseModel):
 
     barcode: str | None = Field(default=None, max_length=80)
     manufacturer_part_number: str | None = Field(default=None, max_length=120)
+    lowes_product_number: str | None = Field(default=None, max_length=80)
+    home_depot_product_number: str | None = Field(default=None, max_length=80)
 
 
 class IntakeLookup(BaseModel):
@@ -150,10 +154,45 @@ class IntakeLookup(BaseModel):
     photo_ids: list[str] = Field(default_factory=list, max_length=8)
 
 
+class IntakeProductLink(BaseModel):
+    store: Literal["home_depot", "lowes", "ebay"]
+    identifier: str = Field(min_length=1, max_length=120)
+    product_url: str = Field(min_length=1, max_length=2000)
+
+    @model_validator(mode="after")
+    def validate_product_url(self) -> "IntakeProductLink":
+        parsed = urlsplit(self.product_url)
+        host = (parsed.hostname or "").lower()
+        allowed_domains = {
+            "home_depot": "homedepot.com",
+            "lowes": "lowes.com",
+            "ebay": "ebay.com",
+        }
+        domain = allowed_domains[self.store]
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not (host == domain or host.endswith("." + domain))
+            or parsed.username
+            or parsed.password
+        ):
+            raise ValueError("Product links must use the selected retailer's website")
+        search_paths = {
+            "home_depot": {"/s"},
+            "lowes": {"/search"},
+            "ebay": {"/sch/i.html"},
+        }
+        normalized_path = parsed.path.rstrip("/")
+        is_home_depot_search = self.store == "home_depot" and normalized_path.startswith("/s/")
+        if normalized_path in search_paths[self.store] or is_home_depot_search:
+            raise ValueError("Save a product page URL, not a retailer search page")
+        return self
+
+
 class IntakeFinalize(BaseModel):
     item: ItemCreate
     selected_field_sources: dict[str, str] = Field(default_factory=dict)
     selected_evidence_ids: list[str] = Field(default_factory=list)
+    selected_product_links: list[IntakeProductLink] = Field(default_factory=list, max_length=60)
 
 
 class CategoryCreate(BaseModel):
@@ -271,10 +310,31 @@ def item_record(row: sqlite3.Row, *, include_private: bool) -> dict:
     return record
 
 
+def item_product_links(connection: sqlite3.Connection, item_id: str) -> list[dict]:
+    rows = connection.execute(
+        """
+        SELECT id, store, identifier, product_url, created_at
+        FROM item_product_links WHERE item_id = ? ORDER BY created_at, id
+        """,
+        (item_id,),
+    ).fetchall()
+    return [
+        {
+            "id": row["id"],
+            "store": row["store"],
+            "identifier": row["identifier"],
+            "product_url": row["product_url"],
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]
+
+
 def intake_record(connection: sqlite3.Connection, intake_id: str, owner_username: str) -> dict:
     intake = connection.execute(
         """
-        SELECT id, barcode, manufacturer_part_number, created_at, expires_at
+        SELECT id, barcode, manufacturer_part_number, lowes_product_number,
+               home_depot_product_number, created_at, expires_at
         FROM assisted_intakes WHERE id = ? AND owner_username = ? AND expires_at > ?
         """,
         (intake_id, owner_username, int(time.time())),
@@ -315,6 +375,8 @@ def intake_record(connection: sqlite3.Connection, intake_id: str, owner_username
         "id": intake["id"],
         "barcode": intake["barcode"],
         "manufacturer_part_number": intake["manufacturer_part_number"],
+        "lowes_product_number": intake["lowes_product_number"],
+        "home_depot_product_number": intake["home_depot_product_number"],
         "created_at": intake["created_at"],
         "expires_at": intake["expires_at"],
         "photos": [
@@ -711,7 +773,7 @@ def catalog_page(owner_username: str) -> str:
             body = quote(message)
             email = quote(first_contact["contact_email"], safe="@.+-_")
             links.append(f'<a href="mailto:{email}?subject={subject}&amp;body={body}">Email</a>')
-        contacts.append(" · ".join(links) or "—")
+        contacts.append(" Â· ".join(links) or "â€”")
 
     source = ColumnDataSource(
         data={
@@ -800,9 +862,9 @@ def catalog_page(owner_username: str) -> str:
             event_contacts.append(
                 f'<a href="mailto:{quote(event["contact_email"], safe="@.+-_")}?subject={quote(event["title"])}&amp;body={quote(event_message)}">Email about this sale</a>'
             )
-        contact_html = f"<p>{' · '.join(event_contacts)}</p>" if event_contacts else ""
+        contact_html = f"<p>{' Â· '.join(event_contacts)}</p>" if event_contacts else ""
         event_cards.append(
-            f'<article class="event"><h3>{html.escape(event["title"])}</h3><p>{start} – {end} UTC</p>{address}{contact_html}</article>'
+            f'<article class="event"><h3>{html.escape(event["title"])}</h3><p>{start} â€“ {end} UTC</p>{address}{contact_html}</article>'
         )
     event_section = "".join(event_cards) or "<p>No upcoming garage-sale dates have been posted yet.</p>"
     return f"""<!doctype html>
@@ -955,14 +1017,18 @@ def create_intake(
     with connect_db() as connection:
         connection.execute(
             """
-            INSERT INTO assisted_intakes(id, owner_username, barcode, manufacturer_part_number, created_at, expires_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO assisted_intakes(
+                id, owner_username, barcode, manufacturer_part_number,
+                lowes_product_number, home_depot_product_number, created_at, expires_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 intake_id,
                 owner,
                 intake.barcode,
                 intake.manufacturer_part_number,
+                intake.lowes_product_number,
+                intake.home_depot_product_number,
                 timestamp(created),
                 expires,
             ),
@@ -993,22 +1059,33 @@ def update_intake(
     owner = workspace_owner(username, request)
     changes = update.model_dump(exclude_unset=True)
     if not changes:
-        raise HTTPException(status_code=422, detail="Provide a barcode or manufacturer part number to update")
+        raise HTTPException(status_code=422, detail="Provide an identifier to update")
     with connect_db() as connection:
         existing = intake_record(connection, intake_id, owner)
         barcode = changes.get("barcode", existing["barcode"])
         manufacturer_part_number = changes.get(
             "manufacturer_part_number", existing["manufacturer_part_number"]
         )
-        if barcode is None or manufacturer_part_number is None:
+        lowes_product_number = changes.get("lowes_product_number", existing["lowes_product_number"])
+        home_depot_product_number = changes.get(
+            "home_depot_product_number", existing["home_depot_product_number"]
+        )
+        if None in (barcode, manufacturer_part_number, lowes_product_number, home_depot_product_number):
             raise HTTPException(status_code=422, detail="Intake identifiers cannot be null")
         connection.execute(
             """
             UPDATE assisted_intakes
-            SET barcode = ?, manufacturer_part_number = ?
+            SET barcode = ?, manufacturer_part_number = ?, lowes_product_number = ?, home_depot_product_number = ?
             WHERE id = ? AND owner_username = ?
             """,
-            (barcode, manufacturer_part_number, intake_id, owner),
+            (
+                barcode,
+                manufacturer_part_number,
+                lowes_product_number,
+                home_depot_product_number,
+                intake_id,
+                owner,
+            ),
         )
         return intake_record(connection, intake_id, owner)
 
@@ -1304,6 +1381,27 @@ def create_draft_from_intake(
                     ),
                 )
 
+            seen_product_links: set[tuple[str, str]] = set()
+            for product_link in request.selected_product_links:
+                key = (product_link.store, product_link.identifier.casefold())
+                if key in seen_product_links:
+                    raise HTTPException(status_code=422, detail="A retailer link may only be selected once per identifier")
+                seen_product_links.add(key)
+                connection.execute(
+                    """
+                    INSERT INTO item_product_links(id, item_id, store, identifier, product_url, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(uuid.uuid4()),
+                        item_id,
+                        product_link.store,
+                        product_link.identifier,
+                        product_link.product_url,
+                        timestamp(),
+                    ),
+                )
+
             staged_photos = connection.execute(
                 "SELECT id, kind, filename, media_type FROM assisted_intake_photos WHERE intake_id = ?",
                 (intake_id,),
@@ -1335,6 +1433,7 @@ def create_draft_from_intake(
         path.unlink(missing_ok=True)
     with connect_db() as connection:
         item_result = item_record(fetch_item(connection, item_id, owner), include_private=True)
+        item_result["product_links"] = item_product_links(connection, item_id)
         item_result["photos"] = [
             {
                 "id": row["id"],
@@ -1385,6 +1484,7 @@ def list_admin_items(
         ).fetchall()
         result = [item_record(row, include_private=True) for row in rows]
         for record in result:
+            record["product_links"] = item_product_links(connection, record["id"])
             photos = connection.execute(
                 """
                 SELECT id, kind, is_public, media_type, created_at

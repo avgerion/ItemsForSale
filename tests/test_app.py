@@ -609,6 +609,106 @@ def test_intake_manual_identifiers_and_sequential_live_provider_runs(client, adm
     assert all("manufacturer_part_number" not in item for item in public)
 
 
+def test_confirmed_retailer_product_links_are_saved_privately(client, admin_headers):
+    intake = client.post(
+        "/api/admin/intakes",
+        json={"barcode": "012345678905"},
+        headers=admin_headers,
+    ).json()
+    response = client.post(
+        f"/api/admin/intakes/{intake['id']}/create-draft",
+        headers=admin_headers,
+        json={
+            "item": {
+                "name": "Owner-confirmed bulb",
+                "category": "Lighting",
+                "condition": "new_sealed",
+                "asking_price": 10,
+            },
+            "selected_product_links": [
+                {
+                    "store": "home_depot",
+                    "identifier": "012345678905",
+                    "product_url": "https://www.homedepot.com/p/example/12345",
+                },
+                {
+                    "store": "ebay",
+                    "identifier": "012345678905",
+                    "product_url": "https://www.ebay.com/itm/123456789",
+                },
+                {
+                    "store": "lowes",
+                    "identifier": "012345678905",
+                    "product_url": "https://www.lowes.com/pd/example/12345",
+                },
+            ],
+        },
+    )
+    assert response.status_code == 201, response.text
+    links = response.json()["product_links"]
+    assert {link["store"] for link in links} == {"home_depot", "ebay", "lowes"}
+    assert all(link["identifier"] == "012345678905" for link in links)
+
+    admin_items = client.get("/api/admin/items", headers=admin_headers)
+    assert admin_items.status_code == 200
+    assert admin_items.json()[0]["product_links"] == links
+
+    public_items = client.get("/api/public/items")
+    assert public_items.status_code == 200
+    assert all("product_links" not in item for item in public_items.json())
+
+
+def test_intake_stores_retailer_product_numbers(client, admin_headers):
+    created = client.post(
+        "/api/admin/intakes",
+        json={"lowes_product_number": "2887500", "home_depot_product_number": "100123456"},
+        headers=admin_headers,
+    )
+    assert created.status_code == 201, created.text
+    intake = created.json()
+    assert intake["lowes_product_number"] == "2887500"
+    assert intake["home_depot_product_number"] == "100123456"
+
+    updated = client.patch(
+        f"/api/admin/intakes/{intake['id']}",
+        json={"lowes_product_number": "999"},
+        headers=admin_headers,
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["lowes_product_number"] == "999"
+    assert updated.json()["home_depot_product_number"] == "100123456"
+
+
+@pytest.mark.parametrize(
+    ("store", "product_url"),
+    [
+        ("home_depot", "javascript:alert(1)"),
+        ("home_depot", "https://homedepot.com.evil.example/p/fake"),
+        ("home_depot", "https://www.homedepot.com/s/012345678905"),
+        ("lowes", "https://www.lowes.com/search?searchTerm=012345678905"),
+        ("ebay", "https://www.ebay.com/sch/i.html?_nkw=012345678905"),
+    ],
+)
+def test_retailer_product_link_rejects_search_or_untrusted_urls(client, admin_headers, store, product_url):
+    intake = client.post("/api/admin/intakes", json={}, headers=admin_headers).json()
+    response = client.post(
+        f"/api/admin/intakes/{intake['id']}/create-draft",
+        headers=admin_headers,
+        json={
+            "item": {
+                "name": "Invalid link test",
+                "category": "Lighting",
+                "condition": "open_box",
+                "asking_price": 1,
+            },
+            "selected_product_links": [
+                {"store": store, "identifier": "12345", "product_url": product_url},
+            ],
+        },
+    )
+    assert response.status_code == 422
+
+
 def test_provider_registry_reports_configuration_without_secrets(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "private-test-key")
     monkeypatch.setenv("OPENAI_API_KEY", "")
@@ -1456,6 +1556,10 @@ def test_bokeh_catalog_page_and_protected_management_page(client, admin_headers)
     assert "Live providers" in management_page.text
     assert "Select for next local or vision run" in management_page.text
     assert "completed/sold-item history" in management_page.text
+    assert "Check retailer product pages" in management_page.text
+    assert "Save confirmed match" in management_page.text
+    assert 'id="intake-lowes-product-number"' in management_page.text
+    assert 'id="intake-home-depot-product-number"' in management_page.text
     assert 'id="photo-form"' in management_page.text
     assert 'id="event-form"' in management_page.text
     assert 'data-view="backups"' in management_page.text

@@ -81,6 +81,8 @@ CREATE TABLE IF NOT EXISTS assisted_intakes (
     owner_username TEXT NOT NULL,
     barcode TEXT NOT NULL DEFAULT '',
     manufacturer_part_number TEXT NOT NULL DEFAULT '',
+    lowes_product_number TEXT NOT NULL DEFAULT '',
+    home_depot_product_number TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     expires_at INTEGER NOT NULL
 );
@@ -125,6 +127,15 @@ CREATE TABLE IF NOT EXISTS item_identification_sources (
     source_type TEXT NOT NULL,
     source_value TEXT NOT NULL,
     retrieved_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS item_product_links (
+    id TEXT PRIMARY KEY,
+    item_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    store TEXT NOT NULL CHECK (store IN ('home_depot', 'lowes', 'ebay')),
+    identifier TEXT NOT NULL,
+    product_url TEXT NOT NULL,
+    created_at TEXT NOT NULL
 );
 """
 
@@ -173,6 +184,14 @@ def initialize_database() -> None:
             if "manufacturer_part_number" not in existing_columns:
                 connection.execute(
                     f"ALTER TABLE {table_name} ADD COLUMN manufacturer_part_number TEXT NOT NULL DEFAULT ''"
+                )
+        intake_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(assisted_intakes)")
+        }
+        for column in ("lowes_product_number", "home_depot_product_number"):
+            if column not in intake_columns:
+                connection.execute(
+                    f"ALTER TABLE assisted_intakes ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
                 )
         raw_users = os.environ.get("INVENTORY_USERS", "")
         try:

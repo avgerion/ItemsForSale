@@ -5,7 +5,7 @@ This guide describes one small, single-server production setup:
 - A Raspberry Pi running Raspberry Pi OS 64-bit.
 - This application served by Uvicorn on loopback only.
 - Caddy as the public HTTPS reverse proxy.
-- A domain name pointed at your home network.
+- A domain name pointed at your home network. Several domains or subdomains can share the one public IP address; Caddy routes each request to the right site by hostname (see "Host multiple sites behind one public IP").
 - Optional USB storage for server-side backups.
 
 Commands assume Raspberry Pi OS/Debian and a local console or trusted LAN SSH session. Replace example names, paths, addresses, and UUIDs with your own. Do not paste passwords, password hashes, or API keys into shared messages or source control.
@@ -54,59 +54,32 @@ Do not expose SSH or Uvicorn to the public internet as a workaround.
 
 ## 3. Install the application and create its service account
 
-Install system packages used by Python, Git, and optionally local OCR:
+Install system packages used by Python, Git, and the deployment script:
 
 ```bash
-sudo apt install --yes git python3-venv python3-pip python3-dev build-essential
+sudo apt install --yes git python3-venv python3-pip python3-dev build-essential curl
 sudo apt install --yes tesseract-ocr
 ```
 
 Tesseract is optional. It enables local OCR; it does not enable the vision providers. Python package installation may take time on a Pi 3. If a dependency cannot install, record the exact package/build error and resolve compatibility before making the site public.
 
-Create a dedicated account and application directory:
-
-```bash
-sudo adduser --system --group --home /opt/items-for-sale --no-create-home --shell /usr/sbin/nologin items-for-sale
-sudo mkdir -p /opt/items-for-sale
-sudo chown root:items-for-sale /opt/items-for-sale
-sudo chmod 750 /opt/items-for-sale
-```
-
-Place the project source in `/opt/items-for-sale`. For example, if the repository is available from a Git remote:
+Clone the repository into the deployment directory and run its installer:
 
 ```bash
 sudo git clone <YOUR-REPOSITORY-URL> /opt/items-for-sale
-```
-
-If the directory already contains a clone, update it using your normal source-control workflow instead of cloning over it. Do not store runtime data or backups inside the source tree.
-
-Create a virtual environment and install the dependencies:
-
-```bash
 cd /opt/items-for-sale
-sudo python3 -m venv .venv
-sudo .venv/bin/python -m pip install --upgrade pip
-sudo .venv/bin/python -m pip install -r requirements.txt
-sudo chown -R root:items-for-sale /opt/items-for-sale
-sudo chmod -R o-rwx /opt/items-for-sale
+sudo bash scripts/deploy.sh
 ```
 
-If the last ownership/permission commands are run, confirm the service group can read and execute the virtual environment and source files. The app user should not be able to edit its own code or dependencies.
+The script creates the `items-for-sale` service account and group, prepares `/var/lib/items-for-sale`, creates `.venv`, installs `requirements.txt`, and installs/enables the systemd service. On first run, it copies `.env.example` to `.env`, sets the persistent data directory, and leaves the service stopped until you configure an owner account. It never replaces an existing `.env` or existing systemd unit.
+
+The source and virtual environment are root-owned and readable by the service group; the app process cannot modify its code or dependencies. Do not store runtime data or backups inside the source tree. The script does not install or configure Caddy, alter router settings, or set `APP_ENV=production`.
 
 ## 4. Configure persistent application data and credentials
 
-Keep application data outside the code directory. This example uses `/var/lib/items-for-sale`:
+The installer creates `/var/lib/items-for-sale` for persistent data and creates the private environment file on first run. Edit it:
 
 ```bash
-sudo install -d -o items-for-sale -g items-for-sale -m 750 /var/lib/items-for-sale
-```
-
-Create the private environment file:
-
-```bash
-sudo cp /opt/items-for-sale/.env.example /opt/items-for-sale/.env
-sudo chown root:items-for-sale /opt/items-for-sale/.env
-sudo chmod 640 /opt/items-for-sale/.env
 sudo nano /opt/items-for-sale/.env
 ```
 
@@ -141,16 +114,19 @@ Workspace isolation is enforced in the database/API: item and event records, cat
 
 Optionally add provider credentials such as `GROQ_API_KEY` to `.env`. Do not put them in the Caddyfile, browser code, Git, or a public message. Restart the app service after editing `.env`.
 
-Check that the service account can read the settings and write application data:
+Confirm the service account can read the settings and write application data, then start the service:
 
 ```bash
 sudo -u items-for-sale test -r /opt/items-for-sale/.env && echo ".env readable"
 sudo -u items-for-sale test -w /var/lib/items-for-sale && echo "data directory writable"
+sudo systemctl start items-for-sale
+sudo systemctl status items-for-sale --no-pager
+curl --fail http://127.0.0.1:8000/health
 ```
 
 ## 5. Run Uvicorn as a local system service
 
-Create `/etc/systemd/system/items-for-sale.service`:
+The installer writes `/etc/systemd/system/items-for-sale.service` with the settings below. `--host 127.0.0.1` ensures Uvicorn does not listen on the LAN or public interfaces. The proxy-header trust list is limited to loopback because Caddy will connect from this Pi. Do not change it to `*`. If you need to customize the unit, edit it directly; subsequent installer runs preserve an existing unit.
 
 ```ini
 [Unit]
@@ -171,17 +147,6 @@ UMask=0077
 
 [Install]
 WantedBy=multi-user.target
-```
-
-`--host 127.0.0.1` ensures Uvicorn does not listen on the LAN or public interfaces. The proxy-header trust list is limited to loopback because Caddy will connect from this Pi. Do not change it to `*`.
-
-Enable and start the service:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now items-for-sale
-sudo systemctl status items-for-sale --no-pager
-curl --fail http://127.0.0.1:8000/health
 ```
 
 Expected health response:
@@ -208,7 +173,7 @@ It should show `127.0.0.1:8000`, not `0.0.0.0:8000` or the Pi's LAN address.
 
 Do this only after the local app works.
 
-1. In your DNS provider, create an **A record** for `items.example.com` pointing to your public IPv4 address.
+1. In your DNS provider, create an **A record** for `items.example.com` pointing to your public IPv4 address. For each additional site, create another A record (for any of your domains or subdomains) pointing to the **same** public IP. Ports 80 and 443 are forwarded once, to the machine running Caddy.
 2. If your public IP changes, use a dynamic DNS updater that updates this record. Caddy obtains certificates but does not update your DNS records by itself.
 3. Add an **AAAA record** only if you have working public IPv6 connectivity, the Pi and Caddy are reachable over IPv6, and your router/firewall permits inbound IPv6 web traffic. A stale or unreachable AAAA record can make some visitors fail to connect; remove it if you cannot support IPv6.
 4. Wait for DNS to resolve and verify the A/AAAA records using your DNS provider or a DNS lookup tool.
@@ -240,7 +205,7 @@ items.example.com {
 }
 ```
 
-Replace the hostname. Caddy's `reverse_proxy` sends the app the original request scheme and client information. Do not add broad custom `X-Forwarded-*` headers or configure Uvicorn to trust arbitrary sources.
+Replace the hostname (and see the next section if you will host more than one site). Caddy's `reverse_proxy` sends the app the original request scheme and client information. Do not add broad custom `X-Forwarded-*` headers or configure Uvicorn to trust arbitrary sources.
 
 Validate and reload:
 
@@ -261,6 +226,36 @@ From a device outside your home network (such as a phone with Wi-Fi disabled), o
 - `https://items.example.com/manage`
 
 The catalog and health check should load with a valid certificate; `/manage` should take an unauthenticated visitor to sign-in. Check Caddy logs if certificate issuance or proxying fails.
+
+### Host multiple sites behind one public IP
+
+Only one process can listen on public ports 80 and 443, so Caddy is the single front door for every site. It reads the hostname the browser asked for and sends the request to the matching backend. Each hostname gets its own automatically managed certificate. Add one site block per hostname to `/etc/caddy/Caddyfile`:
+
+```caddyfile
+items.example.com {
+    encode zstd gzip
+    reverse_proxy 127.0.0.1:8000
+}
+
+blog.example.com {
+    encode zstd gzip
+    root * /var/www/blog
+    file_server
+}
+
+shop.other-domain.org {
+    reverse_proxy 192.168.1.50:3000
+}
+```
+
+- **Different app on this Pi:** run it on its own loopback port (for example `127.0.0.1:8001`) and use `reverse_proxy`. Never reuse port 8000.
+- **Static files:** use `root` and `file_server`, as in the `blog` example.
+- **Another machine on your LAN:** `reverse_proxy` to its private address and port. Give that machine a DHCP reservation and do not forward its port in the router; only Caddy is exposed. Traffic between Caddy and that machine is plain HTTP on your LAN unless you configure otherwise.
+- **Another domain:** add its A record to the same public IP; no router changes are needed.
+- **Isolation:** each site is a separate backend. Keep the `--forwarded-allow-ips=127.0.0.1` setting for this app, and keep each site's secrets and data separate. Sites sharing one Pi also share its CPU, memory, and failures, so a Pi 3 suits only light traffic.
+- **Only this app needs the camera/HTTPS settings:** `APP_ENV` and `PUBLIC_CATALOG_URL` apply per application, not to Caddy.
+
+Requests for a hostname without a site block receive no certificate or content, which is the desired behavior. After each edit, run `sudo caddy validate --config /etc/caddy/Caddyfile` and `sudo systemctl reload caddy`, then test every hostname from outside your network. A mistake in one block can prevent reload for all sites, so validate before reloading.
 
 ## 8. Optional: mount a USB drive on the server
 
@@ -437,9 +432,19 @@ Schedule backups for a low-activity time. SQLite is copied with its online backu
 - Check app logs: `sudo journalctl -u items-for-sale -n 100 --no-pager`.
 - Check proxy/certificate logs: `sudo journalctl -u caddy -n 100 --no-pager`.
 - Check data and USB free space: `df -h /var/lib/items-for-sale /mnt/items-backups`.
-- Update app code and dependencies deliberately; make a backup first, then restart and verify the public site.
+- Update app code and dependencies deliberately. Back up the data directory first, then pull the fast-forward update and run the deployment script, which refreshes the virtual environment and restarts the configured service:
+
+  ```bash
+  sudo systemctl stop items-for-sale
+  sudo tar -C /var/lib -czf "/mnt/items-backups/items-for-sale-data-before-update-$(date +%Y%m%d-%H%M%S).tar.gz" items-for-sale
+  sudo git -C /opt/items-for-sale pull --ff-only
+  sudo bash /opt/items-for-sale/scripts/deploy.sh
+  ```
+
+  The script does not run `git pull` or replace `.env` or an existing systemd unit. If deployment fails, inspect the app and Caddy logs before making the site public again.
 - Apply OS and Caddy security updates regularly, and periodically test reboot, USB mount, and restore behavior.
 - If DNS resolves but certificate issuance fails, check DNS A/AAAA records, router forwarding, firewall rules, Caddy logs, correct system time, and whether the ISP blocks inbound traffic.
+- If one hostname works and another fails, check that its A record points to the same public IP, its site block exists, and its backend is running. Use `sudo journalctl -u caddy -n 100 --no-pager` for per-site errors.
 - If the app works locally but returns 502 through Caddy, verify the app service is healthy and Caddy proxies to `127.0.0.1:8000`.
 - If the public site works but admin sign-in fails only after setting production mode, verify Uvicorn's proxy-header settings and that only the local Caddy proxy is trusted.
 

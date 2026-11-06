@@ -120,6 +120,8 @@ GroqCloud API error details are written to the server log in a bounded, redacted
 
 Vision images are resized before transmission. A run accepts at most four selected photos and a total original upload size of 15 MB. Product-identification and OCR values remain suggestions; verify them manually. Select suggested fields and optional price evidence to carry them into the item form. **Create private draft** transfers staged photos as private photos, stores selected price evidence separately from the owner's asking price, and always creates an unpublished item.
 
+Assisted intake also generates Home Depot, eBay, and Lowe's searches for entered and suggested barcode, MPN, and model values. Enter a Lowe's or Home Depot product number in its own field to get a search link for that retailer (for example `https://www.lowes.com/search?searchTerm=2887500`); Lowe's search also accepts UPCs, so barcode searches are generated for it too. These are ordinary external search links, not retailer lookups, and nothing is saved automatically. To save a match, open the search, confirm the result is the same product, paste its product-page URL, and select **Save confirmed match**. Saved product links are available in the private admin inventory and are not included in public catalog responses; retailer search URLs and non-retailer URLs are rejected.
+
 ## Data and backups
 
 By default, SQLite data and uploads are written to `data/`. `INVENTORY_DATA_DIR`, `INVENTORY_DB_PATH`, and `INVENTORY_UPLOAD_DIR` can override the storage locations. Back up both the database and uploaded photos together, and periodically verify restoration. A second local drive does not provide off-site disaster recovery.

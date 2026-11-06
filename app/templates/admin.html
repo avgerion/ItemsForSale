@@ -151,6 +151,12 @@
     .intake-method small { display: block; color: var(--muted); margin-top: 2px; }
     .intake-method:has(input:disabled) { opacity: .65; }
     .intake-identifiers { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; align-items: end; margin: 14px 0; }
+    .product-link-list { display: grid; gap: 8px; margin: 12px 0 18px; }
+    .product-match-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 7px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; }
+    .product-match-row a, .item-product-links a { overflow-wrap: anywhere; }
+    .product-match-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; }
+    .product-match-controls .field-check { min-height: 38px; }
+    .product-link-note { color: var(--muted); font-size: 10px; line-height: 1.5; margin: 4px 0; }
     .intake-photo-choice { display: flex; align-items: center; gap: 5px; margin-top: 5px; color: var(--muted); font-size: 10px; }
     .intake-provider-group { margin-top: 14px; }
     .intake-provider-group h4 { margin: 12px 0 6px; }
@@ -254,6 +260,8 @@
                 <form id="intake-form">
                   <label class="field">UPC / barcode<input class="control" id="intake-barcode" maxlength="80" placeholder="Enter it manually or add a barcode photo"></label>
                   <label class="field">Manufacturer part number<input class="control" id="intake-manufacturer-part-number" maxlength="120" placeholder="Optional; kept separate from Model"></label>
+                  <label class="field">Lowe's product number<input class="control" id="intake-lowes-product-number" maxlength="80" placeholder="Optional; e.g. 2887500"></label>
+                  <label class="field">Home Depot product number<input class="control" id="intake-home-depot-product-number" maxlength="80" placeholder="Optional"></label>
                   <label class="field">Product photos<input class="control" id="intake-product-files" type="file" accept="image/jpeg,image/png,image/webp" multiple></label>
                   <label class="field">Package photos<input class="control" id="intake-package-files" type="file" accept="image/jpeg,image/png,image/webp" multiple></label>
                   <label class="field">Barcode photos<input class="control" id="intake-barcode-files" type="file" accept="image/jpeg,image/png,image/webp" multiple></label>
@@ -484,6 +492,21 @@
         const evidence = (item.price_evidence || []).map((entry) =>
           `${entry.evidence_type.replaceAll("_", " ")} ${entry.currency} ${entry.amount.toFixed(2)} (${entry.source_name})`);
         meta.textContent = [identity, ...evidence].join(" · ");
+        if (item.product_links?.length) {
+          const links = document.createElement("div");
+          links.className = "item-product-links";
+          item.product_links.forEach((productLink) => {
+            const link = document.createElement("a");
+            link.href = productLink.product_url;
+            link.target = "_blank";
+            link.rel = "noopener noreferrer";
+            link.textContent = `${productLink.store.replaceAll("_", " ")} product page (${productLink.identifier})`;
+            if (links.childNodes.length) links.append(document.createTextNode(" · "));
+            links.appendChild(link);
+          });
+          meta.appendChild(document.createElement("br"));
+          meta.appendChild(links);
+        }
         name.appendChild(meta);
         row.append(name, makeCell(item.category), makeCell(item.condition_label), makeCell(`${item.available_quantity} / ${item.quantity}`), makeCell(`$${item.asking_price.toFixed(2)}`));
         const status = document.createElement("td");
@@ -643,7 +666,11 @@
           ? `Barcode ${intake.barcode}`
           : intake.manufacturer_part_number
             ? `MPN ${intake.manufacturer_part_number}`
-            : "Item without identifier";
+            : intake.lowes_product_number
+              ? `Lowe's ${intake.lowes_product_number}`
+              : intake.home_depot_product_number
+                ? `Home Depot ${intake.home_depot_product_number}`
+                : "Item without identifier";
         const subtitle = document.createElement("p");
         subtitle.textContent = `${intake.photos.length} photo${intake.photos.length === 1 ? "" : "s"} · expires ${formatDate(new Date(intake.expires_at * 1000).toISOString())}`;
         detail.append(title, subtitle);
@@ -702,6 +729,8 @@
           value: intake.manufacturer_part_number,
           maxLength: 120,
         },
+        { name: "lowes_product_number", label: "Lowe's product number", value: intake.lowes_product_number, maxLength: 80 },
+        { name: "home_depot_product_number", label: "Home Depot product number", value: intake.home_depot_product_number, maxLength: 80 },
       ].forEach((field) => {
         const label = document.createElement("label");
         label.className = "field";
@@ -730,16 +759,106 @@
             body: JSON.stringify({
               barcode: String(formData.get("barcode") || "").trim(),
               manufacturer_part_number: String(formData.get("manufacturer_part_number") || "").trim(),
+              lowes_product_number: String(formData.get("lowes_product_number") || "").trim(),
+              home_depot_product_number: String(formData.get("home_depot_product_number") || "").trim(),
             }),
           });
           ui.activeIntake = updated;
           await refreshData();
           renderIntakeReview(updated);
-          notify("Barcode and manufacturer part number saved to this intake.");
+          notify("Identifiers saved to this intake.");
         } catch (error) { notify(error.message, true); }
         finally { submit.disabled = false; }
       });
       content.appendChild(identifiers);
+
+      const productLinksHeading = document.createElement("h3");
+      productLinksHeading.textContent = "Check retailer product pages";
+      content.appendChild(productLinksHeading);
+      const productLinksNote = document.createElement("p");
+      productLinksNote.className = "product-link-note";
+      productLinksNote.textContent = "Searches are suggestions only. Open a result, then paste its product-page URL and check the box only when you have confirmed it is the same item.";
+      content.appendChild(productLinksNote);
+      const identifierValues = new Map();
+      const addIdentifier = (value, label, store = null) => {
+        const cleaned = String(value || "").trim();
+        if (!cleaned) return;
+        const key = cleaned.toLowerCase();
+        if (!identifierValues.has(key)) identifierValues.set(key, { value: cleaned, labels: new Set(), stores: new Set(), allStores: false });
+        const entry = identifierValues.get(key);
+        entry.labels.add(label);
+        if (store === null) entry.allStores = true;
+        else entry.stores.add(store);
+      };
+      addIdentifier(intake.barcode, "Barcode");
+      addIdentifier(intake.manufacturer_part_number, "MPN");
+      addIdentifier(intake.lowes_product_number, "Lowe's product number", "lowes");
+      addIdentifier(intake.home_depot_product_number, "Home Depot product number", "home_depot");
+      intake.candidates.forEach((candidate) => {
+        addIdentifier(candidate.fields.barcode, "Suggested barcode");
+        addIdentifier(candidate.fields.manufacturer_part_number, "Suggested MPN");
+        addIdentifier(candidate.fields.model, "Suggested model");
+      });
+      const productLinkList = document.createElement("div");
+      productLinkList.className = "product-link-list";
+      const retailers = [
+        {
+          store: "home_depot",
+          name: "Home Depot",
+          search: (identifier) => `https://www.homedepot.com/s/${encodeURIComponent(identifier)}`,
+        },
+        {
+          store: "ebay",
+          name: "eBay",
+          search: (identifier) => `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(identifier)}`,
+        },
+        {
+          store: "lowes",
+          name: "Lowe's",
+          search: (identifier) => `https://www.lowes.com/search?searchTerm=${encodeURIComponent(identifier)}`,
+        },
+      ];
+      if (!identifierValues.size) {
+        const empty = document.createElement("p");
+        empty.className = "selection-hint";
+        empty.textContent = "Enter a barcode, part number, or retailer product number above to generate retailer searches.";
+        productLinkList.appendChild(empty);
+      }
+      identifierValues.forEach(({ value, labels, stores, allStores }) => {
+              retailers.filter((retailer) => allStores || stores.has(retailer.store)).forEach((retailer) => {
+          const row = document.createElement("div");
+          row.className = "product-match-row";
+          const searchLink = document.createElement("a");
+          searchLink.href = retailer.search(value);
+          searchLink.target = "_blank";
+          searchLink.rel = "noopener noreferrer";
+          searchLink.textContent = `Search ${retailer.name} for ${value} (${[...labels].join(", ")})`;
+          row.appendChild(searchLink);
+          const controls = document.createElement("div");
+          controls.className = "product-match-controls";
+          const urlLabel = document.createElement("label");
+          urlLabel.className = "field";
+          urlLabel.append(document.createTextNode("Confirmed product-page URL"));
+          const urlInput = document.createElement("input");
+          urlInput.type = "url";
+          urlInput.className = "control";
+          urlInput.placeholder = `Paste the ${retailer.name} product page`;
+          urlInput.dataset.productUrl = "";
+          urlLabel.appendChild(urlInput);
+          const confirmLabel = document.createElement("label");
+          confirmLabel.className = "field-check";
+          const confirmInput = document.createElement("input");
+          confirmInput.type = "checkbox";
+          confirmInput.dataset.productMatch = "";
+          confirmInput.dataset.store = retailer.store;
+          confirmInput.dataset.identifier = value;
+          confirmLabel.append(confirmInput, document.createTextNode("Save confirmed match"));
+          controls.append(urlLabel, confirmLabel);
+          row.appendChild(controls);
+          productLinkList.appendChild(row);
+        });
+      });
+      content.appendChild(productLinkList);
 
       const methodHeading = document.createElement("h3");
       methodHeading.textContent = "Choose one method to run";
@@ -1104,12 +1223,24 @@
         if (intakeId) {
           const selectedEvidence = [...$("intake-review-content").querySelectorAll("input[data-evidence-id]:checked")]
             .map((input) => input.dataset.evidenceId);
+          const selectedProductLinks = [...$("intake-review-content").querySelectorAll("input[data-product-match]:checked")]
+            .map((checkbox) => {
+              const row = checkbox.closest(".product-match-row");
+              const productUrl = row.querySelector("input[data-product-url]").value.trim();
+              if (!productUrl) throw new Error("Enter the confirmed product-page URL for each selected retailer match.");
+              return {
+                store: checkbox.dataset.store,
+                identifier: checkbox.dataset.identifier,
+                product_url: productUrl,
+              };
+            });
           await api(`/api/admin/intakes/${encodeURIComponent(intakeId)}/create-draft`, {
             method: "POST",
             body: JSON.stringify({
               item,
               selected_field_sources: ui.selectedFieldSources,
               selected_evidence_ids: selectedEvidence,
+              selected_product_links: selectedProductLinks,
             }),
           });
         } else {
@@ -1211,8 +1342,10 @@
       ];
       const barcode = $("intake-barcode").value.trim();
       const manufacturerPartNumber = $("intake-manufacturer-part-number").value.trim();
-      if (!barcode && !manufacturerPartNumber && !files.length) {
-        notify("Enter a barcode or manufacturer part number, or select at least one photo.", true);
+      const lowesProductNumber = $("intake-lowes-product-number").value.trim();
+      const homeDepotProductNumber = $("intake-home-depot-product-number").value.trim();
+      if (!barcode && !manufacturerPartNumber && !lowesProductNumber && !homeDepotProductNumber && !files.length) {
+        notify("Enter a barcode or product number, or select at least one photo.", true);
         return;
       }
       if (files.some(({ file }) => file.size > 10 * 1024 * 1024)) {
@@ -1223,7 +1356,12 @@
       try {
         const intake = await api("/api/admin/intakes", {
           method: "POST",
-          body: JSON.stringify({ barcode, manufacturer_part_number: manufacturerPartNumber }),
+          body: JSON.stringify({
+            barcode,
+            manufacturer_part_number: manufacturerPartNumber,
+            lowes_product_number: lowesProductNumber,
+            home_depot_product_number: homeDepotProductNumber,
+          }),
         });
         for (const { file, kind } of files) {
           const form = new FormData();
