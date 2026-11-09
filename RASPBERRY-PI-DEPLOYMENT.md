@@ -6,7 +6,8 @@ This guide describes one small, single-server production setup:
 - This application served by Uvicorn on loopback only.
 - Caddy as the public HTTPS reverse proxy.
 - A domain name pointed at your home network. Several domains or subdomains can share the one public IP address; Caddy routes each request to the right site by hostname (see "Host multiple sites behind one public IP").
-- Optional USB storage for server-side backups.
+- The OS, application source, and Python environment on the Pi's microSD card; the inventory database, item photos, and intake photos on a USB drive mounted at `/mnt/items-for-sale`.
+- A separate backup destination. Backups stored on the same USB drive do not protect against that drive failing.
 
 Commands assume Raspberry Pi OS/Debian and a local console or trusted LAN SSH session. Replace example names, paths, addresses, and UUIDs with your own. Do not paste passwords, password hashes, or API keys into shared messages or source control.
 
@@ -52,6 +53,68 @@ Do not expose SSH or Uvicorn to the public internet as a workaround.
 4. In the router, create a DHCP reservation for the Pi's Ethernet MAC address so its **private LAN address** remains stable. This is not the same as a public IP address.
 5. Prefer a reliable power supply and a USB SSD or high-endurance storage for ongoing use. Keep the SD card or another separate device available for recovery.
 
+### Prepare the USB data drive
+
+Attach a reliable USB SSD or drive. Use an **ext4** filesystem for Linux permissions and SQLite reliability. These steps mount an existing ext4 partition; they do not format it. Formatting erases data, so do not format a drive that contains anything you need.
+
+1. Identify the USB partition, filesystem, and UUID:
+
+   ```bash
+   lsblk -f
+   ```
+
+2. Create the mount point and add an `/etc/fstab` entry using the partition's actual UUID:
+
+   ```bash
+   sudo mkdir -p /mnt/items-for-sale
+   sudo nano /etc/fstab
+   ```
+
+   Add this line, replacing the UUID with the actual UUID of the ext4 partition:
+
+   ```fstab
+   UUID=REPLACE_WITH_ACTUAL_UUID /mnt/items-for-sale ext4 defaults,nofail,x-systemd.device-timeout=10s 0 2
+   ```
+
+3. Verify and mount the drive:
+
+   ```bash
+   sudo findmnt --verify
+   sudo mount /mnt/items-for-sale
+   mountpoint /mnt/items-for-sale
+   df -h /mnt/items-for-sale
+   ```
+
+   Confirm the mount point reports as mounted and the expected USB filesystem is shown. `nofail` lets the Pi boot if the drive is absent; the application service will be configured to require this mount, so it will not silently store inventory on the microSD card.
+
+### Connect to the Pi over SSH
+
+From PowerShell on Windows, Terminal on macOS, or a Linux terminal, connect with:
+
+```bash
+ssh <username>@<pi-lan-ip>
+```
+
+Replace `<username>` with the account name you created in Raspberry Pi Imager, and `<pi-lan-ip>` with the Pi's private address shown in your router's device list. For example:
+
+```bash
+ssh alex@192.168.1.25
+```
+
+Current Raspberry Pi OS installations do not necessarily have a default `pi` account. SSH must be enabled during setup or on the Pi. On the first connection, SSH may ask you to confirm the host key; if you can, verify its fingerprint from the Pi's local console before accepting it. Use this command only from your trusted LAN; do not expose SSH to the public internet.
+
+To connect from Windows PowerShell using your private key, specify it with `-i`:
+
+```powershell
+ssh -i "$env:USERPROFILE\.ssh\id_ed25519" alex@192.168.1.25
+```
+
+Replace the key path, username, and address with yours. Point `-i` at the private key file (for example, `id_ed25519`), not its `.pub` file. If you have a separate OpenSSH user certificate, specify both files:
+
+```powershell
+ssh -i "$env:USERPROFILE\.ssh\id_ed25519" -o CertificateFile="$env:USERPROFILE\.ssh\id_ed25519-cert.pub" alex@192.168.1.25
+```
+
 ## 3. Install the application and create its service account
 
 This step uses `scripts/deploy.sh` for the application installation. The remaining setup in this guide is performed manually; the script does not configure the network, Caddy, public HTTPS, or application credentials.
@@ -68,38 +131,38 @@ Tesseract is optional. It enables local OCR; it does not enable the vision provi
 Clone the repository into the deployment directory and run its installer:
 
 ```bash
-sudo git clone <YOUR-REPOSITORY-URL> /opt/items-for-sale
+sudo git clone https://github.com/avgerion/ItemsForSale.git /opt/items-for-sale
 cd /opt/items-for-sale
 sudo bash scripts/deploy.sh
 ```
 
 `deploy.sh` automates these application setup tasks:
 
-- Creates the `items-for-sale` system account/group and `/var/lib/items-for-sale`.
+- Creates the `items-for-sale` system account/group and the installer's default data directory at `/var/lib/items-for-sale`. The app will use the USB data directory configured in step 4 instead.
 - Creates `.venv` and installs `requirements.txt`.
 - Creates `.env` from `.env.example` only if `.env` does not already exist, and sets its data directory.
 - Installs/enables the Uvicorn systemd service if it does not already exist.
 - Installs the root-owned update service and narrow sudoers rule used by the admin **Update server** button.
 - Restarts the app service after installation when an owner account is configured.
 
-The script does **not** configure `.env` credentials, create the owner password hash, install/configure Caddy, set up DNS/router/firewall rules, enable production HTTPS checks, or mount/configure USB backups. It also does not run `git pull`. On an existing checkout, pull the desired commit yourself before running the script. It preserves an existing `.env` and existing app service unit.
+The script does **not** configure `.env` credentials, create the owner password hash, install/configure Caddy, set up DNS/router/firewall rules, enable production HTTPS checks, or mount/configure USB storage. It also does not run `git pull`. On an existing checkout, pull the desired commit yourself before running the script. It preserves an existing `.env` and existing app service unit.
 
 The source and virtual environment are root-owned and readable by the service group, so the app process cannot modify its code or dependencies. Keep runtime data and backups outside the source tree.
 
 ## 4. Configure persistent application data and credentials
 
-The installer creates `/var/lib/items-for-sale` for persistent data and creates the private environment file on first run. Edit it:
+The installer creates `/var/lib/items-for-sale` and creates the private environment file on first run. The app's live inventory data will be on the USB drive instead. Edit the environment file:
 
 ```bash
-sudo nano /opt/items-for-sale/.env
+sudo vi /opt/items-for-sale/.env
 ```
 
 Set at least:
 
 ```dotenv
 APP_ENV=development
-INVENTORY_DATA_DIR=/var/lib/items-for-sale
-INVENTORY_BACKUP_DIR=
+INVENTORY_DATA_DIR=/mnt/items-for-sale/data
+INVENTORY_BACKUP_DIR=/mnt/items-for-sale/backups
 INVENTORY_DEFAULT_OWNER=owner
 INVENTORY_USERS={}
 INVENTORY_AGENT_OWNERS={}
@@ -107,6 +170,45 @@ PUBLIC_CATALOG_URL=https://sale.beyondthesystem.com
 ```
 
 Keep `APP_ENV=development` until the HTTPS proxy is working and the admin checks in step 9 are complete.
+
+Verify the USB is mounted, then create the data and backup directories with permissions for the service account:
+
+```bash
+mountpoint -q /mnt/items-for-sale || { echo "USB drive is not mounted; stop here."; exit 1; }
+sudo install -d -o items-for-sale -g items-for-sale -m 750 /mnt/items-for-sale/data /mnt/items-for-sale/backups
+```
+
+The guard stops before directory creation if the USB is not mounted; otherwise the directories would be created on the microSD card.
+
+For an existing installation currently storing its data in `/var/lib/items-for-sale`, stop the service and copy the full data directory to the USB before starting the updated app. Keep the original directory as a rollback until you have verified the inventory and photos:
+
+```bash
+sudo systemctl stop items-for-sale
+sudo tar -C /var/lib -czf "/mnt/items-for-sale/backups/items-for-sale-before-usb-$(date +%Y%m%d-%H%M%S).tar.gz" items-for-sale
+sudo cp -a /var/lib/items-for-sale/. /mnt/items-for-sale/data/
+sudo chown -R items-for-sale:items-for-sale /mnt/items-for-sale/data
+```
+
+Make the application service require the USB mount. This prevents a missing drive from causing the app to create a new, empty database on the microSD card:
+
+```bash
+sudo systemctl edit items-for-sale
+```
+
+Add this drop-in content in the editor:
+
+```ini
+[Unit]
+RequiresMountsFor=/mnt/items-for-sale/data
+```
+
+Save and exit the editor, then reload systemd:
+
+```bash
+sudo systemctl daemon-reload
+```
+
+Do not set `INVENTORY_DB_PATH`, `INVENTORY_UPLOAD_DIR`, or `INVENTORY_INTAKE_DIR` to locations on the microSD card. By default, the database and both photo directories are created under `INVENTORY_DATA_DIR`.
 
 Generate the owner's password hash without putting the password in shell history:
 
@@ -119,17 +221,19 @@ The command prompts for the username and password and prints a JSON object. Copy
 
 Each configured username has a separate inventory workspace. Before the updated app's first startup, set `INVENTORY_DEFAULT_OWNER` to the account that should receive any inventory already in the database. To add a separate seller, generate another account hash and add it to `INVENTORY_USERS`. To let an agent work in a seller's workspace, add a mapping such as `INVENTORY_AGENT_OWNERS={"helper":["owner"]}`; this grants that agent view and edit access. Configure the grant on the server and restart the service. The app's root catalog shows the default owner's published items; other users' public catalogs use `/catalog/<username>`.
 
-For an existing installation, stop the service and make a full backup of the data directory before installing/starting the updated version. The ownership migration assigns existing records to `INVENTORY_DEFAULT_OWNER`; set it to an account that exists in `INVENTORY_USERS` before startup. Keep usernames stable because they identify workspace ownership.
+For an existing installation, make a full backup before installing/starting an updated version. The ownership migration assigns existing records to `INVENTORY_DEFAULT_OWNER`; set it to an account that exists in `INVENTORY_USERS` before startup. Keep usernames stable because they identify workspace ownership.
 
 Workspace isolation is enforced in the database/API: item and event records, categories, intake records, and their photo links are scoped to the owner. The app currently keeps these records in one SQLite database and UUID-named photo directories rather than creating separate OS accounts or physical directories per seller. Public catalogs show only each owner's approved content, and each workspace's backup contains only that workspace's records and associated photos.
 
 Optionally add provider credentials such as `GROQ_API_KEY` to `.env`. Do not put them in the Caddyfile, browser code, Git, or a public message. Restart the app service after editing `.env`.
 
-Confirm the service account can read the settings and write application data, then start the service:
+Confirm the USB is still mounted and the service account can read the settings and write application data, then start the service:
 
 ```bash
+mountpoint /mnt/items-for-sale
 sudo -u items-for-sale test -r /opt/items-for-sale/.env && echo ".env readable"
-sudo -u items-for-sale test -w /var/lib/items-for-sale && echo "data directory writable"
+sudo -u items-for-sale test -w /mnt/items-for-sale/data && echo "USB data directory writable"
+sudo -u items-for-sale test -w /mnt/items-for-sale/backups && echo "USB backup directory writable"
 sudo systemctl start items-for-sale
 sudo systemctl status items-for-sale --no-pager
 curl --fail http://127.0.0.1:8000/health
@@ -159,6 +263,8 @@ UMask=0077
 [Install]
 WantedBy=multi-user.target
 ```
+
+The USB mount requirement is configured separately as a systemd drop-in in step 4, so it does not appear in this base unit. The drop-in is preserved when the installer updates the base service.
 
 Expected health response:
 
@@ -275,63 +381,26 @@ For the treasure server, reserve its LAN address and keep its HTTPS listener rea
 
 After each Caddyfile edit, run `sudo caddy validate --config /etc/caddy/Caddyfile` and `sudo systemctl reload caddy`, then test every hostname from outside your network. A mistake in one block can prevent reload for all sites, so validate before reloading.
 
-## 8. Optional: mount a USB drive on the server
+## 8. Protect the USB data and backups
 
-The app's server backup feature expects `INVENTORY_BACKUP_DIR` to be a directory that is **already mounted and writable**. It intentionally does not create a missing mount point, to avoid saving backups to the Pi's system disk when a USB drive is disconnected.
+The application stores its database and item/intake photos under `/mnt/items-for-sale/data`; the server-side backup and update archives go under `/mnt/items-for-sale/backups`. These directories are on the same USB drive, so those archives are useful for recovery from mistakes but **are not protection against USB-drive failure**. Periodically copy backups to another drive or a trusted remote backup location.
 
-1. Attach the drive and identify its partition and filesystem:
+Do not unplug or unmount the USB drive while the app is running. To safely detach it:
 
-   ```bash
-   lsblk -f
-   ```
+```bash
+sudo systemctl stop items-for-sale
+sudo umount /mnt/items-for-sale
+```
 
-   Do not format a drive containing data. If formatting is required, first make sure you have chosen the correct device and have another copy of anything important; formatting destroys data.
+After reconnecting the drive, mount it and start the app:
 
-2. Create a mount point and copy the UUID from `lsblk -f`:
+```bash
+sudo mount /mnt/items-for-sale
+mountpoint /mnt/items-for-sale
+sudo systemctl start items-for-sale
+```
 
-   ```bash
-   sudo mkdir -p /mnt/items-backups
-   sudo nano /etc/fstab
-   ```
-
-3. For an **ext4** partition, add an entry using its actual UUID:
-
-   ```fstab
-   UUID=REPLACE_WITH_ACTUAL_UUID /mnt/items-backups ext4 defaults,nofail 0 2
-   ```
-
-   For exFAT or NTFS, use the filesystem type and mount options appropriate to the installed driver. Do not paste the ext4 example for a different filesystem.
-
-4. Verify and mount:
-
-   ```bash
-   sudo findmnt --verify
-   sudo mount /mnt/items-backups
-   mountpoint /mnt/items-backups
-   df -h /mnt/items-backups
-   ```
-
-   Confirm the mount point reports as mounted and the expected USB filesystem is shown. `nofail` allows the Pi to boot if the drive is absent; the app UI will disable server backup while the mount is unavailable.
-
-5. For an ext4 drive, make the mounted directory writable by the app account:
-
-   ```bash
-   sudo chown items-for-sale:items-for-sale /mnt/items-backups
-   sudo chmod 750 /mnt/items-backups
-   sudo -u items-for-sale test -w /mnt/items-backups && echo "backup directory writable"
-   ```
-
-6. Set this in `/opt/items-for-sale/.env`:
-
-   ```dotenv
-   INVENTORY_BACKUP_DIR=/mnt/items-backups
-   ```
-
-7. Restart Uvicorn after editing `.env`:
-
-   ```bash
-   sudo systemctl restart items-for-sale
-   ```
+If the USB drive is absent at boot, the app service is expected to fail rather than write data to the microSD card. After reconnecting and mounting the drive, start the service as above.
 
 ## 9. Turn on production HTTPS checks and verify
 
@@ -361,16 +430,16 @@ Do this only after the public HTTPS site has a valid certificate and the proxy i
 ## 10. Create and test backups
 
 1. Sign in at `https://sale.beyondthesystem.com/manage` and open **Backups**.
-2. Choose **Download backup ZIP** to save the selected workspace's archive to the computer/browser you are using. Select a client-attached USB drive in the browser's download location if desired.
-3. If the server USB is mounted and configured, confirm the page reports the server backup directory is available and choose **Save / replace server backup**. This creates/replaces a selected-workspace archive such as `/mnt/items-backups/items-for-sale-owner-backup.zip`.
-4. Keep at least one separate copy away from the Pi. A USB drive attached to the same Pi is not off-site disaster recovery.
+2. Choose **Download backup ZIP** to save the selected workspace's archive to the computer/browser you are using.
+3. Confirm the page reports the server backup directory is available and choose **Save / replace server backup**. This creates/replaces a selected-workspace archive such as `/mnt/items-for-sale/backups/items-for-sale-owner-backup.zip`.
+4. Copy backups to a separate drive or trusted remote location. The same USB drive holds both live data and these server-side archives, so it is not an independent backup.
 5. The ZIP contains only the selected workspace's `inventory.sqlite3` records and associated `uploads/` and `intake/` photos; it contains private notes and unpublished inventory, so protect it. It is not a full multi-user database backup.
 
 For disaster recovery of a multi-user installation, use a trusted server-operator backup of the entire data directory while the service is stopped. This captures every workspace and its photos without exposing the other users' records through the application UI:
 
 ```bash
 sudo systemctl stop items-for-sale
-sudo tar -C /var/lib -czf "/mnt/items-backups/items-for-sale-data-$(date +%Y%m%d-%H%M%S).tar.gz" items-for-sale
+sudo tar -C /mnt/items-for-sale -czf "/mnt/items-for-sale/backups/items-for-sale-data-$(date +%Y%m%d-%H%M%S).tar.gz" data
 sudo systemctl start items-for-sale
 ```
 
@@ -378,25 +447,26 @@ Keep that archive restricted because it contains every user's private data. Back
 
 For multi-user disaster recovery, restore the full data-directory archive as follows:
 
-1. Inspect the archive and confirm it contains `items-for-sale/`:
+1. Inspect the archive and confirm it contains `data/`:
 
    ```bash
    DATA_BACKUP=/path/to/items-for-sale-data-backup.tar.gz
    sudo tar -tzf "$DATA_BACKUP" | sed -n '1,20p'
    ```
 
-2. Stop the service and rename the current data directory for rollback:
+2. Confirm the USB drive is mounted, stop the service, and rename the current USB data directory for rollback:
 
    ```bash
+   mountpoint /mnt/items-for-sale
    sudo systemctl stop items-for-sale
-   sudo mv /var/lib/items-for-sale "/var/lib/items-for-sale-before-restore-$(date +%Y%m%d-%H%M%S)"
+   sudo mv /mnt/items-for-sale/data "/mnt/items-for-sale/data-before-restore-$(date +%Y%m%d-%H%M%S)"
    ```
 
 3. Restore the full directory, correct ownership, and verify:
 
    ```bash
-   sudo tar -C /var/lib -xzf "$DATA_BACKUP"
-   sudo chown -R items-for-sale:items-for-sale /var/lib/items-for-sale
+   sudo tar -C /mnt/items-for-sale -xzf "$DATA_BACKUP"
+   sudo chown -R items-for-sale:items-for-sale /mnt/items-for-sale/data
    sudo systemctl start items-for-sale
    sudo systemctl status items-for-sale --no-pager
    curl --fail http://127.0.0.1:8000/health
@@ -414,20 +484,21 @@ For a restore from the workspace ZIP below, use the following procedure only on 
    sudo unzip /path/to/items-for-sale-owner-backup.zip -d /tmp/items-for-sale-restore
    ```
 
-2. Confirm the extracted directory contains `inventory.sqlite3`, `uploads/`, `intake/`, and `backup-info.json`. Stop the app and rename the current data folder so it remains available as a rollback:
+2. Confirm the extracted directory contains `inventory.sqlite3`, `uploads/`, `intake/`, and `backup-info.json`. Confirm the USB drive is mounted, stop the app, and rename the current data folder so it remains available as a rollback:
 
    ```bash
+   mountpoint /mnt/items-for-sale
    sudo systemctl stop items-for-sale
-   sudo mv /var/lib/items-for-sale "/var/lib/items-for-sale-before-restore-$(date +%Y%m%d-%H%M%S)"
-   sudo install -d -o items-for-sale -g items-for-sale -m 750 /var/lib/items-for-sale
+   sudo mv /mnt/items-for-sale/data "/mnt/items-for-sale/data-before-restore-$(date +%Y%m%d-%H%M%S)"
+   sudo install -d -o items-for-sale -g items-for-sale -m 750 /mnt/items-for-sale/data
    ```
 
 3. Copy the restored database and photos, then set ownership:
 
    ```bash
-   sudo cp -a /tmp/items-for-sale-restore/inventory.sqlite3 /var/lib/items-for-sale/
-   sudo cp -a /tmp/items-for-sale-restore/uploads /tmp/items-for-sale-restore/intake /var/lib/items-for-sale/
-   sudo chown -R items-for-sale:items-for-sale /var/lib/items-for-sale
+   sudo cp -a /tmp/items-for-sale-restore/inventory.sqlite3 /mnt/items-for-sale/data/
+   sudo cp -a /tmp/items-for-sale-restore/uploads /tmp/items-for-sale-restore/intake /mnt/items-for-sale/data/
+   sudo chown -R items-for-sale:items-for-sale /mnt/items-for-sale/data
    ```
 
 4. Restart and verify the app:
@@ -440,7 +511,7 @@ For a restore from the workspace ZIP below, use the following procedure only on 
 
 5. Sign in over HTTPS and inspect some inventory items and photos before removing the old data directory or temporary extracted archive. Keep the old directory until you have confirmed the restore.
 
-The ZIP's SQLite snapshot is workspace-scoped. Restoring it replaces the live database with that selected workspace's records, so do not use a single-workspace archive to restore a multi-user installation while expecting other users' records to remain. The restore paths above assume the `INVENTORY_DATA_DIR=/var/lib/items-for-sale` configuration and default upload subdirectories. If you changed `INVENTORY_DB_PATH`, `INVENTORY_UPLOAD_DIR`, or `INVENTORY_INTAKE_DIR`, restore to those configured paths instead.
+The ZIP's SQLite snapshot is workspace-scoped. Restoring it replaces the live database with that selected workspace's records, so do not use a single-workspace archive to restore a multi-user installation while expecting other users' records to remain. The restore paths above assume the `INVENTORY_DATA_DIR=/mnt/items-for-sale/data` configuration and default upload subdirectories. If you changed `INVENTORY_DB_PATH`, `INVENTORY_UPLOAD_DIR`, or `INVENTORY_INTAKE_DIR`, restore to those configured paths instead.
 
 Schedule backups for a low-activity time. SQLite is copied with its online backup API, but photo files can still be added or removed while an archive is being built; avoid uploads, photo edits, and intake cleanup during the backup when you need the closest matching database/photo set.
 
@@ -449,8 +520,8 @@ Schedule backups for a low-activity time. SQLite is copied with its online backu
 - Check services: `sudo systemctl status items-for-sale caddy --no-pager`.
 - Check app logs: `sudo journalctl -u items-for-sale -n 100 --no-pager`.
 - Check proxy/certificate logs: `sudo journalctl -u caddy -n 100 --no-pager`.
-- Check data and USB free space: `df -h /var/lib/items-for-sale /mnt/items-backups`.
-- To install an update interactively, first test the changes locally, then commit and push them to `main`. Sign in as the configured default owner on the Pi and choose **Backups → Update server**. The updater refuses a dirty or diverged checkout, creates a full archive of the database and photos, fast-forwards to `origin/main`, installs the requirements, restarts the app, and checks `/health`. If `INVENTORY_BACKUP_DIR` is configured, it must already be mounted; otherwise the archive is stored in `/var/lib/items-for-sale/system-update-backups`. Treat these archives as private data. This update action is disabled on local development hosts.
+- Check application data and USB free space: `df -h /mnt/items-for-sale`.
+- To install an update interactively, first test the changes locally, then commit and push them to `main`. Sign in as the configured default owner on the Pi and choose **Backups → Update server**. The updater refuses a dirty or diverged checkout, creates a full archive of the database and photos, fast-forwards to `origin/main`, installs the requirements, restarts the app, and checks `/health`. With this guide's configuration, update archives are stored in `/mnt/items-for-sale/backups`; the USB drive must be mounted and writable or the update will fail. If `INVENTORY_BACKUP_DIR` is unset, the fallback is `/mnt/items-for-sale/data/system-update-backups`. Treat these archives as private data. This update action is disabled on local development hosts.
 
   On an existing Pi installation, the updater service is installed the first time you deploy this version. Pull the code and run the deployment installer once:
 
