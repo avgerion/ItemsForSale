@@ -156,6 +156,7 @@ def main() -> int:
     os.chdir(APP_DIR)
     stopped = False
     try:
+        write_status("updating", "Checking GitHub for the latest main commit.")
         branch = run_command("Checking the current branch", "git", "branch", "--show-current")
         if branch != "main":
             raise UpdateError("The server checkout must be on the main branch")

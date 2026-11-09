@@ -50,6 +50,7 @@ from .security import (
     accessible_owners,
     create_session_token,
     hash_password,
+    is_same_origin_request,
     require_admin,
     revoke_session,
     verify_password,
@@ -1031,8 +1032,11 @@ def get_system_update_status(
 
 @app.post("/api/admin/system/update", status_code=status.HTTP_202_ACCEPTED)
 def start_system_update(
+    request: Request,
     username: Annotated[str, Depends(require_admin)],
 ) -> dict[str, str]:
+    if not is_same_origin_request(request):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="A same-origin request is required.")
     if username != DEFAULT_OWNER:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only the primary owner can update the server.")
     if not system_update_enabled():

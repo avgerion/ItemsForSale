@@ -5,6 +5,7 @@ import io
 import json
 import re
 import sqlite3
+import tarfile
 import uuid
 import zipfile
 from datetime import datetime, timedelta, timezone
@@ -20,6 +21,7 @@ from app.main import app
 from app import providers
 from app.providers import ProviderError, _normalize_upcitemdb, provider_statuses, run_provider
 from app.security import hash_password
+from scripts import update_server
 
 
 @pytest.fixture
@@ -165,7 +167,8 @@ def test_system_update_is_disabled_without_deployment_setup(client, admin_header
     status_response = client.get("/api/admin/system/update", headers=admin_headers)
     assert status_response.status_code == 200
     assert status_response.json()["enabled"] is False
-    assert client.post("/api/admin/system/update", headers=admin_headers).status_code == 503
+    update_headers = {**admin_headers, "Origin": "http://testserver"}
+    assert client.post("/api/admin/system/update", headers=update_headers).status_code == 503
     assert client.post("/api/admin/system/update").status_code == 401
 
 
@@ -203,7 +206,7 @@ def test_system_update_is_owner_only_and_starts_the_fixed_service(
 
     started = client.post(
         "/api/admin/system/update",
-        headers={"Authorization": f"Basic {owner_token}"},
+        headers={"Authorization": f"Basic {owner_token}", "Origin": "http://testserver"},
     )
     assert started.status_code == 202
     assert observed["command"] == [
@@ -218,9 +221,34 @@ def test_system_update_is_owner_only_and_starts_the_fixed_service(
 
     denied = client.post(
         "/api/admin/system/update",
-        headers={"Authorization": f"Basic {helper_token}"},
+        headers={"Authorization": f"Basic {helper_token}", "Origin": "http://testserver"},
     )
     assert denied.status_code == 403
+
+
+def test_system_update_backup_contains_data_without_archiving_itself(monkeypatch, tmp_path):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    data_dir = tmp_path / "data"
+    upload_dir = data_dir / "uploads"
+    intake_dir = data_dir / "intake"
+    upload_dir.mkdir(parents=True)
+    intake_dir.mkdir()
+    (data_dir / "inventory.sqlite3").write_bytes(b"database")
+    (upload_dir / "item.jpg").write_bytes(b"item-photo")
+    (intake_dir / "intake.jpg").write_bytes(b"intake-photo")
+    monkeypatch.setattr(update_server, "APP_DIR", source_dir)
+    monkeypatch.setattr(update_server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(update_server, "dotenv_values", lambda _: {"INVENTORY_DATA_DIR": str(data_dir)})
+
+    backup = update_server.create_data_backup()
+    with tarfile.open(backup, "r:gz") as archive:
+        member_names = archive.getnames()
+
+    assert any(name.endswith("inventory.sqlite3") for name in member_names)
+    assert any(name.endswith("uploads/item.jpg") for name in member_names)
+    assert any(name.endswith("intake/intake.jpg") for name in member_names)
+    assert not any("system-update-backups" in name for name in member_names)
 
 
 def test_database_upgrade_adds_manufacturer_part_number_columns(tmp_path, monkeypatch):

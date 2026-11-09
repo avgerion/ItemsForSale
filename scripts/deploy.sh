@@ -94,6 +94,7 @@ ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
 NoNewPrivileges=true
+ReadWritePaths=/usr/local/lib/items-for-sale
 
 [Install]
 WantedBy=multi-user.target

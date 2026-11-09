@@ -54,6 +54,8 @@ Do not expose SSH or Uvicorn to the public internet as a workaround.
 
 ## 3. Install the application and create its service account
 
+This step uses `scripts/deploy.sh` for the application installation. The remaining setup in this guide is performed manually; the script does not configure the network, Caddy, public HTTPS, or application credentials.
+
 Install system packages used by Python, Git, and the deployment script:
 
 ```bash
@@ -71,9 +73,18 @@ cd /opt/items-for-sale
 sudo bash scripts/deploy.sh
 ```
 
-The script creates the `items-for-sale` service account and group, prepares `/var/lib/items-for-sale`, creates `.venv`, installs `requirements.txt`, and installs/enables the systemd service. It also installs a separate root-owned updater service and a sudoers rule that lets the app start only that service. The updater pulls only fast-forward changes from `origin/main`; it does not grant the web process general shell or source-tree write access. On first run, the installer copies `.env.example` to `.env`, sets the persistent data directory, and leaves the app service stopped until you configure an owner account. It never replaces an existing `.env` or existing app systemd unit.
+`deploy.sh` automates these application setup tasks:
 
-The source and virtual environment are root-owned and readable by the service group; the app process cannot modify its code or dependencies. Do not store runtime data or backups inside the source tree. The script does not install or configure Caddy, alter router settings, or set `APP_ENV=production`.
+- Creates the `items-for-sale` system account/group and `/var/lib/items-for-sale`.
+- Creates `.venv` and installs `requirements.txt`.
+- Creates `.env` from `.env.example` only if `.env` does not already exist, and sets its data directory.
+- Installs/enables the Uvicorn systemd service if it does not already exist.
+- Installs the root-owned update service and narrow sudoers rule used by the admin **Update server** button.
+- Restarts the app service after installation when an owner account is configured.
+
+The script does **not** configure `.env` credentials, create the owner password hash, install/configure Caddy, set up DNS/router/firewall rules, enable production HTTPS checks, or mount/configure USB backups. It also does not run `git pull`. On an existing checkout, pull the desired commit yourself before running the script. It preserves an existing `.env` and existing app service unit.
+
+The source and virtual environment are root-owned and readable by the service group, so the app process cannot modify its code or dependencies. Keep runtime data and backups outside the source tree.
 
 ## 4. Configure persistent application data and credentials
 
@@ -92,10 +103,10 @@ INVENTORY_BACKUP_DIR=
 INVENTORY_DEFAULT_OWNER=owner
 INVENTORY_USERS={}
 INVENTORY_AGENT_OWNERS={}
-PUBLIC_CATALOG_URL=https://items.example.com
+PUBLIC_CATALOG_URL=https://sale.beyondthesystem.com
 ```
 
-Replace `items.example.com` with your actual hostname. Keep `APP_ENV=development` until the HTTPS proxy is working and the admin checks in step 9 are complete.
+Keep `APP_ENV=development` until the HTTPS proxy is working and the admin checks in step 9 are complete.
 
 Generate the owner's password hash without putting the password in shell history:
 
@@ -173,11 +184,11 @@ It should show `127.0.0.1:8000`, not `0.0.0.0:8000` or the Pi's LAN address.
 
 Do this only after the local app works.
 
-1. In your DNS provider, create an **A record** for `items.example.com` pointing to your public IPv4 address. For each additional site, create another A record (for any of your domains or subdomains) pointing to the **same** public IP. Ports 80 and 443 are forwarded once, to the machine running Caddy.
+1. In your DNS provider, create **A records** for `home.beyondthesystem.com`, `sale.beyondthesystem.com`, and `treasure.beyondthesystem.com`, all pointing to your public IPv4 address. Ports 80 and 443 are forwarded once, to the machine running Caddy.
 2. If your public IP changes, use a dynamic DNS updater that updates this record. Caddy obtains certificates but does not update your DNS records by itself.
 3. Add an **AAAA record** only if you have working public IPv6 connectivity, the Pi and Caddy are reachable over IPv6, and your router/firewall permits inbound IPv6 web traffic. A stale or unreachable AAAA record can make some visitors fail to connect; remove it if you cannot support IPv6.
 4. Wait for DNS to resolve and verify the A/AAAA records using your DNS provider or a DNS lookup tool.
-5. In the router, forward TCP ports **80 and 443** to the Pi's stable private LAN address. Do not forward port 8000 or SSH (port 22) to the internet.
+5. In the router, forward TCP ports **80 and 443** to the Pi running Caddy (the Items for Sale Pi in this example). Remove any existing public 443 forward directly to Home Assistant; a typical router cannot send the same public port to both Caddy and Home Assistant. Do not forward port 8000, Home Assistant's port, the treasure server's port, or SSH (port 22) to the internet.
 6. If using a host firewall, permit inbound TCP 80 and 443. Permit SSH only from your trusted LAN if needed. Configure and test the SSH allow rule before enabling a firewall remotely, so you do not lock yourself out.
 
 If ISP/router networking prevents inbound traffic, stop here and use a tunnel instead. Do not expose Uvicorn directly.
@@ -196,16 +207,32 @@ sudo apt update
 sudo apt install caddy
 ```
 
-Edit `/etc/caddy/Caddyfile`:
+Edit `/etc/caddy/Caddyfile`. Replace the sample `192.168.1.20` and `192.168.1.30` addresses with the reserved LAN addresses of the Home Assistant and treasure Pis, respectively, and change the upstream ports if those services use different ports:
 
 ```caddyfile
-items.example.com {
+sale.beyondthesystem.com {
     encode zstd gzip
     reverse_proxy 127.0.0.1:8000
 }
+
+home.beyondthesystem.com {
+    reverse_proxy https://192.168.50.128:8123 {
+        transport http {
+            tls_server_name home.beyondthesystem.com
+        }
+    }
+}
+
+treasure.beyondthesystem.com {
+    reverse_proxy https://192.168.1.30:443 {
+        transport http {
+            tls_server_name treasure.beyondthesystem.com
+        }
+    }
+}
 ```
 
-Replace the hostname (and see the next section if you will host more than one site). Caddy's `reverse_proxy` sends the app the original request scheme and client information. Do not add broad custom `X-Forwarded-*` headers or configure Uvicorn to trust arbitrary sources.
+Caddy terminates browser HTTPS and obtains/renews a public certificate for each hostname. The Home Assistant and treasure backends use HTTPS too; Caddy verifies their certificates against the hostname set by `tls_server_name`. Use a certificate trusted by the Caddy host and valid for that hostname. Do not add `tls_insecure_skip_verify`. If either backend uses a private CA or self-signed certificate, configure that CA as trusted by Caddy rather than disabling verification. Caddy's `reverse_proxy` passes the request information needed by the app; do not add broad custom `X-Forwarded-*` headers or configure Uvicorn to trust arbitrary sources.
 
 Validate and reload:
 
@@ -219,43 +246,34 @@ sudo journalctl -u caddy -n 100 --no-pager
 
 Caddy automatically obtains and renews publicly trusted TLS certificates and redirects HTTP to HTTPS when its hostname is public, DNS points to the server, ports 80/443 reach Caddy, and its data directory is writable and persistent. See [Caddy Automatic HTTPS](https://caddyserver.com/docs/automatic-https). Certificate issuance can fail until DNS and router forwarding are correct.
 
-From a device outside your home network (such as a phone with Wi-Fi disabled), open:
+From a device outside your home network (such as a phone with Wi-Fi disabled), test all three sites:
 
-- `https://items.example.com/`
-- `https://items.example.com/health`
-- `https://items.example.com/manage`
+- `https://sale.beyondthesystem.com/`
+- `https://sale.beyondthesystem.com/health`
+- `https://sale.beyondthesystem.com/manage`
+- `https://home.beyondthesystem.com/`
+- `https://treasure.beyondthesystem.com/`
 
 The catalog and health check should load with a valid certificate; `/manage` should take an unauthenticated visitor to sign-in. Check Caddy logs if certificate issuance or proxying fails.
 
-### Host multiple sites behind one public IP
+### Backend and Home Assistant setup
 
-Only one process can listen on public ports 80 and 443, so Caddy is the single front door for every site. It reads the hostname the browser asked for and sends the request to the matching backend. Each hostname gets its own automatically managed certificate. Add one site block per hostname to `/etc/caddy/Caddyfile`:
+Caddy is the single public entry point: only it receives the router's public 80/443 forwards. The Home Assistant certificate remains on the Home Assistant server for Caddy's verified HTTPS connection to it; browsers see the public certificate managed by Caddy. If Home Assistant must continue presenting its existing certificate directly to browsers, it cannot also share the same public IP's port 443 with Caddy using an ordinary router port-forward. That requires a different public IP, a TLS/SNI-aware front end, or a nonstandard external port.
 
-```caddyfile
-items.example.com {
-    encode zstd gzip
-    reverse_proxy 127.0.0.1:8000
-}
+For Home Assistant, keep its HTTPS listener and certificate enabled on the LAN at port 8123 (or adjust the Caddy upstream if yours differs). Configure Home Assistant to accept forwarded requests only from the Caddy Pi's reserved LAN address. In `configuration.yaml`, merge these settings into any existing `http:` section rather than creating a duplicate:
 
-blog.example.com {
-    encode zstd gzip
-    root * /var/www/blog
-    file_server
-}
-
-shop.other-domain.org {
-    reverse_proxy 192.168.1.50:3000
-}
+```yaml
+http:
+  use_x_forwarded_for: true
+  trusted_proxies:
+    - 192.168.1.10
 ```
 
-- **Different app on this Pi:** run it on its own loopback port (for example `127.0.0.1:8001`) and use `reverse_proxy`. Never reuse port 8000.
-- **Static files:** use `root` and `file_server`, as in the `blog` example.
-- **Another machine on your LAN:** `reverse_proxy` to its private address and port. Give that machine a DHCP reservation and do not forward its port in the router; only Caddy is exposed. Traffic between Caddy and that machine is plain HTTP on your LAN unless you configure otherwise.
-- **Another domain:** add its A record to the same public IP; no router changes are needed.
-- **Isolation:** each site is a separate backend. Keep the `--forwarded-allow-ips=127.0.0.1` setting for this app, and keep each site's secrets and data separate. Sites sharing one Pi also share its CPU, memory, and failures, so a Pi 3 suits only light traffic.
-- **Only this app needs the camera/HTTPS settings:** `APP_ENV` and `PUBLIC_CATALOG_URL` apply per application, not to Caddy.
+Replace `192.168.1.10` with the Caddy Pi's LAN IP and restart Home Assistant. Do not trust the whole LAN or expose the Home Assistant port through the router.
 
-Requests for a hostname without a site block receive no certificate or content, which is the desired behavior. After each edit, run `sudo caddy validate --config /etc/caddy/Caddyfile` and `sudo systemctl reload caddy`, then test every hostname from outside your network. A mistake in one block can prevent reload for all sites, so validate before reloading.
+For the treasure server, reserve its LAN address and keep its HTTPS listener reachable from Caddy on the configured upstream port. Caddy-to-backend traffic remains encrypted and certificate-verified. Only the Caddy Pi should be exposed to the internet; do not forward either backend's port. Keep the app's `--forwarded-allow-ips=127.0.0.1` setting, and keep each site's secrets and data separate.
+
+After each Caddyfile edit, run `sudo caddy validate --config /etc/caddy/Caddyfile` and `sudo systemctl reload caddy`, then test every hostname from outside your network. A mistake in one block can prevent reload for all sites, so validate before reloading.
 
 ## 8. Optional: mount a USB drive on the server
 
@@ -325,7 +343,7 @@ Do this only after the public HTTPS site has a valid certificate and the proxy i
 
    ```dotenv
    APP_ENV=production
-   PUBLIC_CATALOG_URL=https://items.example.com
+   PUBLIC_CATALOG_URL=https://sale.beyondthesystem.com
    ```
 
 4. Restart the app:
@@ -342,7 +360,7 @@ Do this only after the public HTTPS site has a valid certificate and the proxy i
 
 ## 10. Create and test backups
 
-1. Sign in at `https://items.example.com/manage` and open **Backups**.
+1. Sign in at `https://sale.beyondthesystem.com/manage` and open **Backups**.
 2. Choose **Download backup ZIP** to save the selected workspace's archive to the computer/browser you are using. Select a client-attached USB drive in the browser's download location if desired.
 3. If the server USB is mounted and configured, confirm the page reports the server backup directory is available and choose **Save / replace server backup**. This creates/replaces a selected-workspace archive such as `/mnt/items-backups/items-for-sale-owner-backup.zip`.
 4. Keep at least one separate copy away from the Pi. A USB drive attached to the same Pi is not off-site disaster recovery.
