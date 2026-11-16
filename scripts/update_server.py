@@ -70,18 +70,24 @@ def is_within(path: Path, parent: Path) -> bool:
     return path == parent or parent in path.parents
 
 
-def configured_paths() -> tuple[list[Path], Path, bool]:
+def configured_paths() -> tuple[list[Path], Path, Path | None]:
     config = dotenv_values(APP_DIR / ".env")
     data_dir = Path(config.get("INVENTORY_DATA_DIR") or DATA_DIR).expanduser().resolve()
     database_path = Path(config.get("INVENTORY_DB_PATH") or data_dir / "inventory.sqlite3").expanduser().resolve()
     upload_dir = Path(config.get("INVENTORY_UPLOAD_DIR") or data_dir / "uploads").expanduser().resolve()
     intake_dir = Path(config.get("INVENTORY_INTAKE_DIR") or data_dir / "intake").expanduser().resolve()
     backup_value = (config.get("INVENTORY_BACKUP_DIR") or "").strip()
+    mount_value = (config.get("INVENTORY_UPDATE_BACKUP_MOUNT_DIR") or "").strip()
+    if mount_value and not backup_value:
+        raise UpdateError("Set INVENTORY_BACKUP_DIR when configuring an update backup mount")
     backup_dir = (
         Path(backup_value).expanduser().resolve()
         if backup_value
         else (data_dir / "system-update-backups").resolve()
     )
+    backup_mount = None
+    if backup_value:
+        backup_mount = Path(mount_value).expanduser().resolve() if mount_value else backup_dir
     roots = [path for path in (data_dir, database_path, upload_dir, intake_dir) if path.exists()]
     if not roots:
         raise UpdateError("No inventory data paths exist to back up")
@@ -89,13 +95,15 @@ def configured_paths() -> tuple[list[Path], Path, bool]:
         raise UpdateError("The update backup directory cannot be an inventory data path")
     if is_within(backup_dir, APP_DIR):
         raise UpdateError("The update backup directory must be outside the source tree")
-    return roots, backup_dir, bool(backup_value)
+    if backup_mount is not None and not is_within(backup_dir, backup_mount):
+        raise UpdateError("The update backup directory must be inside the configured backup mount")
+    return roots, backup_dir, backup_mount
 
 
 def create_data_backup() -> Path:
-    roots, backup_dir, configured_backup = configured_paths()
-    if configured_backup:
-        if not backup_dir.is_dir() or not os.path.ismount(backup_dir):
+    roots, backup_dir, backup_mount = configured_paths()
+    if backup_mount is not None:
+        if not backup_dir.is_dir() or not os.path.ismount(backup_mount):
             raise UpdateError("The configured server backup directory is not mounted")
     else:
         backup_dir.mkdir(parents=True)

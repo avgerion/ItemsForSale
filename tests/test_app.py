@@ -252,6 +252,78 @@ def test_system_update_backup_contains_data_without_archiving_itself(monkeypatch
     assert not any("system-update-backups" in name for name in member_names)
 
 
+def test_system_update_backup_accepts_subdirectory_of_explicit_mount(monkeypatch, tmp_path):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (data_dir / "inventory.sqlite3").write_bytes(b"database")
+    mount_dir = tmp_path / "usb"
+    backup_dir = mount_dir / "backups"
+    backup_dir.mkdir(parents=True)
+    monkeypatch.setattr(update_server, "APP_DIR", tmp_path / "source")
+    monkeypatch.setattr(update_server, "dotenv_values", lambda _: {
+        "INVENTORY_DATA_DIR": str(data_dir),
+        "INVENTORY_BACKUP_DIR": str(backup_dir),
+        "INVENTORY_UPDATE_BACKUP_MOUNT_DIR": str(mount_dir),
+    })
+    monkeypatch.setattr(update_server.os.path, "ismount", lambda path: path == mount_dir)
+
+    backup = update_server.create_data_backup()
+    assert backup.parent == backup_dir
+    with tarfile.open(backup, "r:gz") as archive:
+        assert any(name.endswith("inventory.sqlite3") for name in archive.getnames())
+
+
+def test_system_update_backup_rejects_unmounted_or_unrelated_mount(monkeypatch, tmp_path):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    mount_dir = tmp_path / "usb"
+    backup_dir = mount_dir / "backups"
+    backup_dir.mkdir(parents=True)
+    config = {
+        "INVENTORY_DATA_DIR": str(data_dir),
+        "INVENTORY_BACKUP_DIR": str(backup_dir),
+        "INVENTORY_UPDATE_BACKUP_MOUNT_DIR": str(mount_dir),
+    }
+    monkeypatch.setattr(update_server, "APP_DIR", tmp_path / "source")
+    monkeypatch.setattr(update_server, "dotenv_values", lambda _: config)
+    monkeypatch.setattr(update_server.os.path, "ismount", lambda _: False)
+
+    with pytest.raises(update_server.UpdateError, match="not mounted"):
+        update_server.create_data_backup()
+    assert not list(backup_dir.iterdir())
+
+    config["INVENTORY_UPDATE_BACKUP_MOUNT_DIR"] = str(tmp_path / "other-usb")
+    with pytest.raises(update_server.UpdateError, match="inside the configured backup mount"):
+        update_server.create_data_backup()
+
+
+def test_system_update_backup_without_mount_setting_requires_backup_directory_mount(monkeypatch, tmp_path):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    backup_dir = tmp_path / "usb" / "backups"
+    backup_dir.mkdir(parents=True)
+    monkeypatch.setattr(update_server, "APP_DIR", tmp_path / "source")
+    monkeypatch.setattr(update_server, "dotenv_values", lambda _: {
+        "INVENTORY_DATA_DIR": str(data_dir),
+        "INVENTORY_BACKUP_DIR": str(backup_dir),
+    })
+    monkeypatch.setattr(update_server.os.path, "ismount", lambda path: path == backup_dir.parent)
+
+    with pytest.raises(update_server.UpdateError, match="not mounted"):
+        update_server.create_data_backup()
+
+    monkeypatch.setattr(update_server.os.path, "ismount", lambda path: path == backup_dir)
+    assert update_server.create_data_backup().parent == backup_dir
+
+
+def test_system_update_backup_mount_setting_requires_backup_directory(monkeypatch, tmp_path):
+    monkeypatch.setattr(update_server, "dotenv_values", lambda _: {
+        "INVENTORY_UPDATE_BACKUP_MOUNT_DIR": str(tmp_path),
+    })
+    with pytest.raises(update_server.UpdateError, match="Set INVENTORY_BACKUP_DIR"):
+        update_server.configured_paths()
+
+
 def test_database_upgrade_adds_manufacturer_part_number_columns(tmp_path, monkeypatch):
     monkeypatch.setenv("INVENTORY_USERS", "")
     monkeypatch.setattr(database, "DEFAULT_OWNER", "owner")

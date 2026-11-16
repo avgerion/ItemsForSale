@@ -163,6 +163,7 @@ Set at least:
 APP_ENV=development
 INVENTORY_DATA_DIR=/mnt/items-for-sale/data
 INVENTORY_BACKUP_DIR=/mnt/items-for-sale/backups
+INVENTORY_UPDATE_BACKUP_MOUNT_DIR=/mnt/items-for-sale
 INVENTORY_DEFAULT_OWNER=owner
 INVENTORY_USERS={}
 INVENTORY_AGENT_OWNERS={}
@@ -322,7 +323,7 @@ sale.beyondthesystem.com {
 }
 
 home.beyondthesystem.com {
-    reverse_proxy https://192.168.50.128:8123 {
+    reverse_proxy https://192.168.50.48:8123 {
         transport http {
             tls_server_name home.beyondthesystem.com
         }
@@ -527,9 +528,9 @@ Schedule backups for a low-activity time. SQLite is copied with its online backu
 - Check app logs: `sudo journalctl -u items-for-sale -n 100 --no-pager`.
 - Check proxy/certificate logs: `sudo journalctl -u caddy -n 100 --no-pager`.
 - Check application data and USB free space: `df -h /mnt/items-for-sale`.
-- To install an update interactively, first test the changes locally, then commit and push them to `main`. Sign in as the configured default owner on the Pi and choose **Backups → Update server**. The updater refuses a dirty or diverged checkout, creates a full archive of the database and photos, fast-forwards to `origin/main`, installs the requirements, restarts the app, and checks `/health`. With this guide's configuration, update archives are stored in `/mnt/items-for-sale/backups`; the USB drive must be mounted and writable or the update will fail. If `INVENTORY_BACKUP_DIR` is unset, the fallback is `/mnt/items-for-sale/data/system-update-backups`. Treat these archives as private data. This update action is disabled on local development hosts.
+- To install an update interactively, first test the changes locally, then commit and push them to `main`. Sign in as the configured default owner on the Pi and choose **Backups → Update server**. The updater refuses a dirty or diverged checkout, creates a full archive of the database and photos, fast-forwards to `origin/main`, installs the requirements, restarts the app, and checks `/health`. With this guide's configuration, update archives are stored in `/mnt/items-for-sale/backups`; `INVENTORY_UPDATE_BACKUP_MOUNT_DIR` identifies the actual USB mount and the update fails if it is absent. Without that setting, the configured backup directory itself must be a mount point. If `INVENTORY_BACKUP_DIR` is unset, the fallback is `/mnt/items-for-sale/data/system-update-backups`. Treat these archives as private data. This update action is disabled on local development hosts.
 
-  On an existing Pi installation, the updater service is installed the first time you deploy this version. Pull the code and run the deployment installer once:
+  On an existing Pi installation, the updater service is installed the first time you deploy this version. If the installed updater cannot update because it requires the backup subdirectory itself to be mounted, first verify the USB mount, stop the app, and make a full data backup as described in section 10. Confirm the backup succeeded and leave the app stopped. Add `INVENTORY_UPDATE_BACKUP_MOUNT_DIR=/mnt/items-for-sale` to the private environment file. After the fix has been committed and pushed, pull the code and run the deployment installer once:
 
   ```bash
   sudo git -C /opt/items-for-sale pull --ff-only origin main
