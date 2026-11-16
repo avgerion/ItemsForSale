@@ -8,6 +8,7 @@ import sqlite3
 import tarfile
 import uuid
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -1520,6 +1521,132 @@ def test_public_catalog_returns_only_published_available_inventory(client, admin
     assert "storage_location" not in listing
     assert "barcode" not in listing
     assert "brand" in listing
+
+
+def test_inventory_labels_print_decode_and_keep_identity(client, admin_headers):
+    item = create_item(client, admin_headers)
+    other = create_item(client, admin_headers, name="Second item")
+    assert item["item_number"] != other["item_number"]
+    assert item["item_number"] != item["barcode"]
+    assert "item_number" not in client.get("/api/public/items").json()[0]
+
+    labels = client.post(
+        "/api/admin/labels/print",
+        headers=admin_headers,
+        json={"item_ids": [item["id"], other["id"]]},
+    )
+    assert labels.status_code == 200
+    label = labels.json()[0]
+    assert label["item_number"] == item["item_number"]
+    assert label["price"] == item["asking_price"]
+    image = base64.b64decode(label["image"])
+    decoded = client.post(
+        "/api/admin/labels/decode",
+        headers=admin_headers,
+        files={"file": ("label.png", image, "image/png")},
+    )
+    assert decoded.status_code == 200
+    assert decoded.json()["id"] == item["id"]
+    manual = client.post(
+        "/api/admin/labels/lookup",
+        headers=admin_headers,
+        json={"item_number": item["item_number"].lower()},
+    )
+    assert manual.json()["id"] == item["id"]
+    assert client.post("/api/admin/labels/print", json={"item_ids": [item["id"]]}).status_code == 401
+    assert client.post(
+        "/api/admin/labels/decode", headers=admin_headers,
+        files={"file": ("bad.png", b"not an image", "image/png")},
+    ).status_code == 415
+    blank = io.BytesIO()
+    Image.new("RGB", (200, 200), "white").save(blank, format="PNG")
+    assert client.post(
+        "/api/admin/labels/decode", headers=admin_headers,
+        files={"file": ("blank.png", blank.getvalue(), "image/png")},
+    ).status_code == 422
+    assert client.post(
+        "/api/admin/labels/lookup", headers=admin_headers, json={"item_number": item["barcode"]}
+    ).status_code == 404
+
+    with database.connect_db() as connection:
+        connection.execute("DELETE FROM item_labels WHERE item_id = ?", (other["id"],))
+    database.initialize_database()
+    listings = client.get("/api/admin/items", headers=admin_headers).json()
+    by_id = {entry["id"]: entry for entry in listings}
+    assert by_id[item["id"]]["item_number"] == item["item_number"]
+    assert by_id[other["id"]]["item_number"] != other["item_number"]
+    database.initialize_database()
+    assert client.get("/api/admin/items", headers=admin_headers).json() == listings
+
+
+def test_scan_sale_updates_available_and_reserved_stock_and_rejects_stale_requests(client, admin_headers):
+    item = create_item(client, admin_headers, quantity=5, reserved_quantity=2)
+    url = f"/api/admin/items/{item['id']}/scan-sale"
+    first = {"quantity": 2, "stock": "available", "expected_updated_at": item["updated_at"]}
+    assert client.post(url, json=first).status_code == 401
+    response = client.post(url, headers=admin_headers, json=first)
+    assert response.status_code == 200
+    result = response.json()
+    assert (result["available_quantity"], result["reserved_quantity"], result["sold_quantity"]) == (1, 2, 2)
+    assert client.post(url, headers=admin_headers, json=first).status_code == 409
+    assert client.post(url, headers=admin_headers, json={
+        "quantity": 3, "stock": "reserved", "expected_updated_at": result["updated_at"],
+    }).status_code == 409
+    result = client.post(url, headers=admin_headers, json={
+        "quantity": 2, "stock": "reserved", "expected_updated_at": result["updated_at"],
+    }).json()
+    assert (result["available_quantity"], result["reserved_quantity"], result["sold_quantity"]) == (1, 0, 4)
+    assert len(client.get("/api/public/items").json()) == 1
+    response = client.post(url, headers=admin_headers, json={
+        "quantity": 1, "stock": "available", "expected_updated_at": result["updated_at"],
+    })
+    assert response.json()["availability"] == "sold"
+    assert client.get("/api/public/items").json() == []
+
+
+def test_concurrent_scan_sales_cannot_apply_the_same_review_twice(client, admin_headers):
+    item = create_item(client, admin_headers, quantity=3)
+    url = f"/api/admin/items/{item['id']}/scan-sale"
+    sale = {"quantity": 1, "stock": "available", "expected_updated_at": item["updated_at"]}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: client.post(url, headers=admin_headers, json=sale), range(2)))
+    assert sorted(response.status_code for response in results) == [200, 409]
+    saved = client.get("/api/admin/items", headers=admin_headers).json()[0]
+    assert saved["sold_quantity"] == 1
+
+
+def test_inventory_label_access_and_backup_are_workspace_scoped(client, admin_headers, monkeypatch):
+    item = create_item(client, admin_headers)
+    seller_password = "seller password for testing 2026"
+    monkeypatch.setenv("INVENTORY_USERS", json.dumps({
+        "owner": hash_password("correct horse battery staple 2026"),
+        "seller": hash_password(seller_password),
+    }))
+    seller_headers = {"Authorization": "Basic " + base64.b64encode(f"seller:{seller_password}".encode()).decode()}
+    assert client.post("/api/admin/categories", headers=seller_headers, json={"name": "Lighting"}).status_code == 201
+    seller_item = create_item(client, seller_headers)
+    assert client.post("/api/admin/labels/lookup", headers=seller_headers, json={
+        "item_number": item["item_number"],
+    }).status_code == 404
+    assert client.post("/api/admin/labels/print", headers=seller_headers, json={
+        "item_ids": [item["id"]],
+    }).status_code == 404
+    assert client.post(f"/api/admin/items/{item['id']}/scan-sale", headers=seller_headers, json={
+        "quantity": 1, "stock": "available", "expected_updated_at": item["updated_at"],
+    }).status_code == 404
+    response = client.get("/api/admin/backups/download", headers=admin_headers)
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        snapshot = sqlite3.connect(":memory:")
+        try:
+            snapshot.deserialize(archive.read("inventory.sqlite3"))
+            assert snapshot.execute(
+                "SELECT item_number FROM item_labels WHERE item_id = ?", (item["id"],)
+            ).fetchone()[0] == item["item_number"]
+            assert snapshot.execute(
+                "SELECT COUNT(*) FROM item_labels WHERE item_id = ?", (seller_item["id"],)
+            ).fetchone()[0] == 0
+        finally:
+            snapshot.close()
 
 
 def test_reserved_units_are_counted_and_filterable(client, admin_headers):

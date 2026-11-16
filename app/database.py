@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import sqlite3
 import time
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -55,6 +57,11 @@ CREATE TABLE IF NOT EXISTS item_photos (
     media_type TEXT NOT NULL,
     is_public INTEGER NOT NULL DEFAULT 0 CHECK (is_public IN (0, 1)),
     created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS item_labels (
+    item_id TEXT PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,
+    item_number TEXT NOT NULL UNIQUE
 );
 
 CREATE TABLE IF NOT EXISTS sale_events (
@@ -193,6 +200,11 @@ def initialize_database() -> None:
                 connection.execute(
                     f"ALTER TABLE assisted_intakes ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
                 )
+        missing_labels = connection.execute(
+            "SELECT id FROM items WHERE NOT EXISTS (SELECT 1 FROM item_labels WHERE item_id = items.id)"
+        ).fetchall()
+        for row in missing_labels:
+            create_item_label(connection, row["id"])
         raw_users = os.environ.get("INVENTORY_USERS", "")
         try:
             configured_users = json.loads(raw_users) if raw_users else {}
@@ -224,6 +236,14 @@ def initialize_database() -> None:
             "CREATE INDEX IF NOT EXISTS idx_events_owner_start ON sale_events(owner_username, starts_at)"
         )
     purge_expired_intakes()
+
+
+def create_item_label(connection: sqlite3.Connection, item_id: str) -> str:
+    item_number = "IFS1-" + base64.b32encode(uuid.uuid4().bytes).decode("ascii").rstrip("=")
+    connection.execute(
+        "INSERT INTO item_labels(item_id, item_number) VALUES (?, ?)", (item_id, item_number)
+    )
+    return item_number
 
 
 def _rebuild_categories_with_workspace_uniqueness(connection: sqlite3.Connection) -> None:

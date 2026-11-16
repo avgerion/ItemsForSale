@@ -67,7 +67,7 @@ Attach a reliable USB SSD or drive. Use an **ext4** filesystem for Linux permiss
 
    ```bash
    sudo mkdir -p /mnt/items-for-sale
-   sudo nano /etc/fstab
+   sudo vi /etc/fstab
    ```
 
    Add this line, replacing the UUID with the actual UUID of the ext4 partition:
@@ -426,6 +426,12 @@ Do this only after the public HTTPS site has a valid certificate and the proxy i
 6. Confirm plain HTTP redirects to HTTPS and never exposes admin cookies over HTTP.
 
 `APP_ENV=production` does not enable TLS, configure Caddy, create accounts, or install the application as a service. Those are separate steps above.
+
+### Verify inventory labels on a phone
+
+After upgrading, sign in over the public HTTPS address on the phone and open **Scan sale**. Grant camera permission and test a printed inventory QR label. Live scanning depends on browser support; use photo capture/upload or manual number entry if it is unavailable. The phone must reach this server, but label generation and photo decoding do not use a cloud barcode service. Print a test sheet at Letter size and 100% scale with headers, footers, and fit-to-page disabled; match margins and gaps to the label stock and printer.
+
+The database stores each listing's inventory number. Back up before upgrading and retain a backup after numbers have been assigned. Restoring a pre-upgrade backup may assign different numbers, so labels printed after that backup may need to be reprinted.
 
 ## 10. Create and test backups
 

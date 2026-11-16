@@ -22,6 +22,7 @@
       --shadow: 0 12px 32px rgb(30 38 32 / 5%);
     }
     * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
     body { margin: 0; min-width: 320px; }
     button, input, select, textarea { font: inherit; }
     button, a { -webkit-tap-highlight-color: transparent; }
@@ -164,6 +165,22 @@
     .intake-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
     .evidence-row { display: flex; align-items: flex-start; gap: 8px; padding: 9px 0; border-top: 1px solid #eef0f2; font-size: 10px; line-height: 1.5; }
     .evidence-row input { margin-top: 2px; }
+    .label-preview { overflow: auto; max-width: 100%; background: #e7e9ed; padding: 12px; }
+    .print-sheet { position: relative; width: 8.5in; height: 11in; background: white; margin: 0 auto 12px; }
+    .print-label { position: absolute; display: flex; align-items: center; overflow: hidden; color: black; background: white; font: 10pt Arial, sans-serif; }
+    .print-label img { height: 90%; max-width: 48%; object-fit: contain; flex-shrink: 0; }
+    .print-label-text { min-width: 0; overflow-wrap: anywhere; max-height: 100%; overflow: hidden; display: flex; flex-direction: column; }
+    .print-label-text strong { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; flex-shrink: 1; }
+    .print-label-price { font-size: 15pt; font-weight: 700; line-height: 1.1; white-space: nowrap; flex-shrink: 0; }
+    .print-label-number { font-size: 7pt; flex-shrink: 0; }
+    @page { size: letter; margin: 0; }
+    @media print {
+      body { margin: 0; }
+      .shell { display: none !important; }
+      #print-output { display: block !important; }
+      .print-sheet { margin: 0; break-after: page; page-break-after: always; }
+      .print-sheet:last-child { break-after: auto; page-break-after: auto; }
+    }
     @media (max-width: 1050px) {
       .layout { grid-template-columns: 190px minmax(0, 1fr); }
       .content-grid { grid-template-columns: minmax(0, 1fr); }
@@ -176,7 +193,7 @@
       aside { min-height: 0; padding: 8px 12px; border-right: 0; border-bottom: 1px solid var(--line); overflow-x: auto; }
       .nav-label, .aside-note { display: none; }
       .nav-list { display: flex; width: max-content; gap: 5px; margin: 0; }
-      .nav-button { width: auto; min-height: 40px; padding: 0 12px; }
+      .nav-button { width: auto; min-height: 40px; padding: 0 12px; scroll-margin-top: 72px; }
       main { padding: 24px 14px 44px; }
       .page-heading { align-items: center; margin-bottom: 19px; }
       .page-heading .button { min-height: 38px; padding: 0 10px; }
@@ -217,6 +234,8 @@
           <button class="nav-button" data-view="overview" aria-current="page"><span class="nav-icon">⌂</span>Overview</button>
           <button class="nav-button" data-view="intake"><span class="nav-icon">＋</span>Assisted intake</button>
           <button class="nav-button" data-view="inventory"><span class="nav-icon">▤</span>Inventory <span class="badge" id="nav-inventory-count">0</span></button>
+          <button class="nav-button" data-view="labels"><span class="nav-icon">▦</span>Print labels</button>
+          <button class="nav-button" data-view="scan"><span class="nav-icon">⌕</span>Scan sale</button>
           <button class="nav-button" data-view="events"><span class="nav-icon">▦</span>Sale events</button>
           <button class="nav-button" data-view="categories"><span class="nav-icon">◇</span>Categories</button>
           <button class="nav-button" data-view="backups"><span class="nav-icon">⇩</span>Backups</button>
@@ -306,7 +325,8 @@
                   <select class="control" id="item-category-filter" aria-label="Filter by category"><option value="">All categories</option></select>
                   <select class="control" id="item-status-filter" aria-label="Filter by status"><option value="">All statuses</option><option value="available">Available</option><option value="reserved">Reserved</option><option value="sold">Sold</option><option value="hidden">Hidden</option></select>
                 </div>
-                <div class="table-wrap"><table><thead><tr><th>Item</th><th>Category</th><th>Condition</th><th>Available</th><th>Price</th><th>Status</th><th>Actions</th></tr></thead><tbody id="items"></tbody></table><div class="empty" id="items-empty" hidden>No items match these filters.</div></div>
+                <div class="form-actions"><button class="button" type="button" id="select-filtered">Select filtered items</button><button class="button" type="button" id="print-selected">Print selected</button></div>
+                <div class="table-wrap"><table><thead><tr><th>Select</th><th>Item</th><th>Category</th><th>Condition</th><th>Available</th><th>Price</th><th>Status</th><th>Actions</th></tr></thead><tbody id="items"></tbody></table><div class="empty" id="items-empty" hidden>No items match these filters.</div></div>
               </div>
             </section>
             <div>
@@ -333,7 +353,7 @@
                       <label class="field-check field-wide"><input type="checkbox" id="is_published"> Publish this listing in the public catalog</label>
                     </div>
                     <input type="hidden" id="item-intake-id">
-                    <div class="form-actions"><button class="button button-primary" type="submit" id="save-item">Save item</button><button class="button" type="button" id="cancel-edit">Clear</button></div>
+                    <div class="form-actions"><button class="button button-primary" type="submit" id="save-item">Save item</button><button class="button" type="button" id="print-edit-item">Print label</button><button class="button" type="button" id="cancel-edit">Clear</button></div>
                   </form>
                 </div>
               </section>
@@ -354,6 +374,48 @@
               </section>
             </div>
           </div>
+        </section>
+
+        <section class="section" id="view-labels">
+          <div class="page-heading"><div><p class="eyebrow">Labels</p><h1>Print inventory labels</h1><p class="subheading">Select items in Inventory, then configure a US Letter sheet.</p></div></div>
+          <section class="panel"><div class="panel-body">
+            <p id="label-selection">No items selected.</p>
+            <div class="form-grid">
+              <label class="field">Sheet layout<select class="control" id="label-preset"><option value="2,2">2 columns × 2 rows</option><option value="4,6">4 columns × 6 rows</option><option value="4,8">4 columns × 8 rows</option><option value="custom">Custom</option></select></label>
+              <label class="field">Copies per item<input class="control" type="number" id="label-copies" min="1" max="100" value="1"></label>
+              <label class="field">Columns<input class="control" type="number" id="label-columns" min="1" max="12" value="2"></label>
+              <label class="field">Rows<input class="control" type="number" id="label-rows" min="1" max="20" value="2"></label>
+              <label class="field">Left margin (in)<input class="control" type="number" id="label-left" min="0" max="4" step="0.01" value="0.25"></label>
+              <label class="field">Right margin (in)<input class="control" type="number" id="label-right" min="0" max="4" step="0.01" value="0.25"></label>
+              <label class="field">Top margin (in)<input class="control" type="number" id="label-top" min="0" max="5" step="0.01" value="0.5"></label>
+              <label class="field">Bottom margin (in)<input class="control" type="number" id="label-bottom" min="0" max="5" step="0.01" value="0.5"></label>
+              <label class="field">Horizontal gap (in)<input class="control" type="number" id="label-gap-x" min="0" max="2" step="0.01" value="0"></label>
+              <label class="field">Vertical gap (in)<input class="control" type="number" id="label-gap-y" min="0" max="2" step="0.01" value="0"></label>
+              <label class="field">First label position on first sheet<input class="control" type="number" id="label-start" min="1" value="1"></label>
+            </div>
+            <p class="selection-hint">Presets specify grid counts, not a particular label manufacturer's dimensions. Match margins and gaps to your label stock. Print at actual size, not “fit to page”.</p>
+            <div class="form-actions"><button class="button button-primary" type="button" id="label-preview-button">Preview</button><button class="button" type="button" id="label-print-button" disabled>Print</button></div>
+            <div class="label-preview" id="label-preview" hidden></div>
+          </div></section>
+        </section>
+
+        <section class="section" id="view-scan">
+          <div class="page-heading"><div><p class="eyebrow">Checkout</p><h1>Scan a sale</h1><p class="subheading">Scan an inventory QR label, then review and confirm the quantity sold.</p></div></div>
+          <section class="panel"><div class="panel-body">
+            <div class="form-actions"><button class="button" type="button" id="sale-camera-start">Start camera</button><button class="button" type="button" id="sale-camera-capture" hidden>Capture photo</button><button class="button" type="button" id="sale-camera-stop" hidden>Stop camera</button></div>
+            <video id="sale-camera-video" playsinline muted hidden style="width:100%;max-height:50vh;background:#000"></video>
+            <p id="sale-camera-status" class="selection-hint">Live scanning depends on your browser. You can also capture or upload a photo, or enter the number.</p>
+            <label class="field">Label photo<input class="control" type="file" id="sale-photo" accept="image/jpeg,image/png,image/webp" capture="environment"></label>
+            <form id="sale-lookup-form"><label class="field">Inventory number<input class="control" id="sale-number" maxlength="80" required></label><button class="button" type="submit">Find item</button></form>
+            <div id="sale-result" hidden>
+              <h2 id="sale-item-name"></h2><p id="sale-item-details"></p>
+              <form id="sale-form">
+                <label class="field">Sell from<select class="control" id="sale-stock"><option value="available">Available stock</option><option value="reserved">Reserved stock</option></select></label>
+                <label class="field">Quantity sold<input class="control" type="number" id="sale-quantity" min="1" value="1" required></label>
+                <button class="button button-primary" type="submit" id="sale-confirm">Confirm sale</button>
+              </form>
+            </div>
+          </div></section>
         </section>
 
         <section class="section" id="view-events">
@@ -415,9 +477,13 @@
       </main>
     </div>
   </div>
+  <div id="print-output" hidden></div>
   <script>
     const $ = (id) => document.getElementById(id);
     const ui = { items: [], categories: [], events: [], intakes: [], providers: [], backupStatus: null, systemUpdateStatus: null, workspaces: [], workspace: "", activeIntake: null, selectedFieldSources: {}, selectedItem: null, noticeTimer: null };
+    const labelSelection = new Set();
+    let labelRevision = 0;
+    const saleCamera = { stream: null, detector: null, running: false, item: null, generation: 0 };
     const fieldNames = ["name", "category", "brand", "model", "manufacturer_part_number", "barcode", "condition", "quantity", "reserved_quantity", "sold_quantity", "asking_price", "availability", "storage_location", "description", "private_notes", "is_published"];
 
     async function api(url, options = {}) {
@@ -440,6 +506,7 @@
     }
 
     function showView(name) {
+      if (name !== "scan") stopSaleCamera();
       document.querySelectorAll(".section").forEach((section) => section.classList.toggle("active", section.id === `view-${name}`));
       document.querySelectorAll(".nav-button").forEach((button) => {
         if (button.dataset.view === name) button.setAttribute("aria-current", "page");
@@ -489,6 +556,17 @@
       body.replaceChildren();
       filtered.forEach((item) => {
         const row = document.createElement("tr");
+        const selectCell = document.createElement("td");
+        const select = document.createElement("input");
+        select.type = "checkbox";
+        select.checked = labelSelection.has(item.id);
+        select.setAttribute("aria-label", `Select ${item.name} for printing`);
+        select.addEventListener("change", () => {
+          if (select.checked) labelSelection.add(item.id); else labelSelection.delete(item.id);
+          invalidateLabels();
+        });
+        selectCell.appendChild(select);
+        row.appendChild(selectCell);
         const name = document.createElement("td");
         const title = document.createElement("div");
         title.textContent = item.name;
@@ -496,7 +574,7 @@
         name.appendChild(title);
         const meta = document.createElement("div");
         meta.className = "item-meta";
-        const identity = [item.brand, item.model, item.manufacturer_part_number, item.barcode].filter(Boolean).join(" · ") || "No brand or model";
+        const identity = [item.item_number, item.brand, item.model, item.manufacturer_part_number, item.barcode].filter(Boolean).join(" · ");
         const evidence = (item.price_evidence || []).map((entry) =>
           `${entry.evidence_type.replaceAll("_", " ")} ${entry.currency} ${entry.amount.toFixed(2)} (${entry.source_name})`);
         meta.textContent = [identity, ...evidence].join(" · ");
@@ -525,6 +603,7 @@
         actionGroup.className = "row-actions";
         appendAction(actionGroup, "Edit", () => editItem(item));
         appendAction(actionGroup, `Photos${item.photos.length ? ` (${item.photos.length})` : ""}`, () => showPhotos(item));
+        appendAction(actionGroup, "Print label", () => openLabels([item.id]));
         actions.appendChild(actionGroup);
         row.appendChild(actions);
         body.appendChild(row);
@@ -558,6 +637,7 @@
         row.append(state);
         const action = document.createElement("td");
         appendAction(action, "Edit", () => { showView("inventory"); editItem(item); });
+        appendAction(action, "Print label", () => openLabels([item.id]));
         row.append(action);
         body.appendChild(row);
       });
@@ -1124,6 +1204,11 @@
       select.value = ui.workspace;
       updateWorkspaceLinks();
       select.addEventListener("change", async () => {
+        stopSaleCamera();
+        saleCamera.item = null;
+        $("sale-result").hidden = true;
+        labelSelection.clear();
+        invalidateLabels();
         ui.workspace = select.value;
         window.localStorage.setItem("items-for-sale-workspace", ui.workspace);
         updateWorkspaceLinks();
@@ -1132,6 +1217,23 @@
         catch (error) { notify(`Could not load this workspace: ${error.message}`, true); }
       });
       await refreshData();
+      const target = sessionStorage.getItem("items-for-sale-label-target") || window.location.search;
+      sessionStorage.removeItem("items-for-sale-label-target");
+      if (target) {
+        const params = new URLSearchParams(target);
+        const owner = params.get("owner");
+        const itemIds = params.getAll("print_item");
+        if (owner && itemIds.length && ui.workspaces.some((workspace) => workspace.username === owner)) {
+          if (ui.workspace !== owner) {
+            ui.workspace = owner;
+            select.value = owner;
+            updateWorkspaceLinks();
+            await refreshData();
+          }
+          if (itemIds.every((id) => ui.items.some((item) => item.id === id))) openLabels(itemIds);
+          else notify("A selected item is not available in this workspace.", true);
+        } else notify("You do not have access to the selected workspace.", true);
+      }
     }
 
     function updateWorkspaceLinks() {
@@ -1483,6 +1585,260 @@
       } catch (error) { notify(error.message, true); }
       finally { button.disabled = false; }
     });
+
+    function invalidateLabels() {
+      labelRevision++;
+      $("label-selection").textContent = `${labelSelection.size} item(s) selected.`;
+      $("label-print-button").disabled = true;
+      $("label-preview").hidden = true;
+      $("label-preview").replaceChildren();
+      $("print-output").replaceChildren();
+    }
+
+    function openLabels(ids) {
+      labelSelection.clear();
+      ids.forEach((id) => labelSelection.add(id));
+      invalidateLabels();
+      renderItems();
+      showView("labels");
+    }
+
+    $("select-filtered").addEventListener("click", () => {
+      filteredItems().forEach((item) => labelSelection.add(item.id));
+      invalidateLabels();
+      renderItems();
+    });
+    $("print-selected").addEventListener("click", () => {
+      if (!labelSelection.size) { notify("Select at least one item.", true); return; }
+      invalidateLabels();
+      showView("labels");
+    });
+    $("print-edit-item").addEventListener("click", () => {
+      const id = $("item-id").value;
+      if (!id) { notify("Save the item before printing its label.", true); return; }
+      openLabels([id]);
+    });
+    $("label-preset").addEventListener("change", () => {
+      if ($("label-preset").value !== "custom") {
+        const [columns, rows] = $("label-preset").value.split(",");
+        $("label-columns").value = columns;
+        $("label-rows").value = rows;
+      }
+      invalidateLabels();
+    });
+    ["label-columns", "label-rows"].forEach((id) => $(id).addEventListener("input", () => {
+      $("label-preset").value = "custom";
+    }));
+    ["label-columns", "label-rows", "label-copies", "label-left", "label-right", "label-top", "label-bottom", "label-gap-x", "label-gap-y", "label-start"].forEach((id) => {
+      $(id).addEventListener("input", invalidateLabels);
+    });
+    $("label-preview-button").addEventListener("click", async () => {
+      const ids = [...labelSelection];
+      if (!ids.length || ids.length > 100) { notify("Select between 1 and 100 items.", true); return; }
+      const fields = ["columns", "rows", "copies", "left", "right", "top", "bottom", "gap-x", "gap-y", "start"];
+      const values = {};
+      for (const field of fields) {
+        const input = $(`label-${field}`);
+        if (!input.checkValidity() || input.value.trim() === "") { notify(`Check the ${field} value.`, true); return; }
+        values[field] = Number(input.value);
+      }
+      const { columns, rows, copies, left, right, top, bottom, start } = values;
+      const gapX = values["gap-x"], gapY = values["gap-y"];
+      if (![columns, rows, copies, start].every(Number.isInteger) || start > columns * rows || ids.length * copies > 500) {
+        notify("Use whole numbers, a valid starting position, and no more than 500 labels.", true); return;
+      }
+      const width = (8.5 - left - right - (columns - 1) * gapX) / columns;
+      const height = (11 - top - bottom - (rows - 1) * gapY) / rows;
+      if (width <= 0 || height <= 0 || Math.min(width * 0.48, height * 0.9) < 0.6) {
+        notify("This layout does not fit the sheet or leaves less than 0.6 inches for the QR code.", true); return;
+      }
+      const button = $("label-preview-button");
+      const revision = labelRevision;
+      const workspace = ui.workspace;
+      $("label-print-button").disabled = true;
+      button.disabled = true;
+      try {
+        const labels = await api("/api/admin/labels/print", { method: "POST", body: JSON.stringify({ item_ids: ids }) });
+        if (revision !== labelRevision || workspace !== ui.workspace) return;
+        const output = $("print-output");
+        output.replaceChildren();
+        let index = start - 1;
+        labels.forEach((label) => {
+          for (let count = 0; count < copies; count++, index++) {
+            const pageIndex = Math.floor(index / (columns * rows));
+            while (output.children.length <= pageIndex) {
+              const sheet = document.createElement("div");
+              sheet.className = "print-sheet";
+              output.appendChild(sheet);
+            }
+            const position = index % (columns * rows);
+            const labelBox = document.createElement("div");
+            labelBox.className = "print-label";
+            labelBox.style.cssText = `left:${left + (position % columns) * (width + gapX)}in;top:${top + Math.floor(position / columns) * (height + gapY)}in;width:${width}in;height:${height}in`;
+            const img = document.createElement("img");
+            img.src = `data:image/png;base64,${label.image}`;
+            img.alt = "";
+            const text = document.createElement("div");
+            text.className = "print-label-text";
+            const name = document.createElement("strong"); name.textContent = label.name;
+            const price = document.createElement("div"); price.className = "print-label-price"; price.textContent = `$${label.price.toFixed(2)}`;
+            const number = document.createElement("div"); number.className = "print-label-number"; number.textContent = label.item_number;
+            text.append(name, price, number);
+            labelBox.append(img, text);
+            output.children[pageIndex].appendChild(labelBox);
+          }
+        });
+        $("label-preview").replaceChildren(...[...output.children].map((sheet) => sheet.cloneNode(true)));
+        $("label-preview").hidden = false;
+        const clipped = [...$("label-preview").querySelectorAll(".print-label-price, .print-label-number")].some((element) => {
+          const text = element.getBoundingClientRect();
+          const label = element.closest(".print-label").getBoundingClientRect();
+          const container = element.parentElement.getBoundingClientRect();
+          return element.scrollWidth > element.clientWidth || text.bottom > label.bottom || text.right > label.right || text.bottom > container.bottom;
+        });
+        if (clipped) throw new Error("The price or inventory number does not fit. Choose a larger label.");
+        $("label-print-button").disabled = false;
+      } catch (error) { notify(error.message, true); }
+      finally { button.disabled = false; }
+    });
+    $("label-print-button").addEventListener("click", () => window.print());
+
+    function stopSaleCamera() {
+      saleCamera.generation++;
+      saleCamera.running = false;
+      if (saleCamera.stream) saleCamera.stream.getTracks().forEach((track) => track.stop());
+      saleCamera.stream = null;
+      $("sale-camera-video").srcObject = null;
+      $("sale-camera-video").hidden = $("sale-camera-capture").hidden = $("sale-camera-stop").hidden = true;
+      $("sale-camera-start").hidden = false;
+    }
+
+    function showSaleItem(item) {
+      saleCamera.item = item;
+      $("sale-number").value = item.item_number;
+      $("sale-item-name").textContent = item.name;
+      $("sale-item-details").textContent = `${item.item_number} · Available: ${item.available_quantity} · Reserved: ${item.reserved_quantity} · Sold: ${item.sold_quantity}`;
+      $("sale-quantity").value = 1;
+      $("sale-stock").value = item.available_quantity ? "available" : "reserved";
+      $("sale-result").hidden = false;
+    }
+
+    async function lookupSale(number) {
+      const workspace = ui.workspace;
+      const item = await api("/api/admin/labels/lookup", { method: "POST", body: JSON.stringify({ item_number: number }) });
+      if (workspace !== ui.workspace) return;
+      stopSaleCamera();
+      showSaleItem(item);
+    }
+
+    async function detectSaleCode() {
+      if (!saleCamera.running || !saleCamera.detector) return;
+      try {
+        const results = await saleCamera.detector.detect($("sale-camera-video"));
+        if (!saleCamera.running) return;
+        const code = results.find((result) => result.rawValue.startsWith("IFS1-"));
+        if (code) {
+          saleCamera.running = false;
+          await lookupSale(code.rawValue);
+          return;
+        }
+        requestAnimationFrame(detectSaleCode);
+      } catch (error) {
+        saleCamera.running = false;
+        $("sale-camera-status").textContent = `Live scanning failed: ${error.message}. Capture a photo instead.`;
+      }
+    }
+
+    $("sale-camera-start").addEventListener("click", async () => {
+      stopSaleCamera();
+      saleCamera.item = null;
+      $("sale-result").hidden = true;
+      if (!navigator.mediaDevices?.getUserMedia) { notify("Camera unavailable. Upload a photo or enter the number.", true); return; }
+      const generation = saleCamera.generation;
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
+        if (generation !== saleCamera.generation) { stream.getTracks().forEach((track) => track.stop()); return; }
+        saleCamera.stream = stream;
+        const video = $("sale-camera-video");
+        video.srcObject = saleCamera.stream;
+        video.hidden = $("sale-camera-capture").hidden = $("sale-camera-stop").hidden = false;
+        $("sale-camera-start").hidden = true;
+        await video.play();
+        if (generation !== saleCamera.generation) return;
+        saleCamera.detector = null;
+        if ("BarcodeDetector" in window && (await BarcodeDetector.getSupportedFormats()).includes("qr_code")) {
+          if (generation !== saleCamera.generation) return;
+          saleCamera.detector = new BarcodeDetector({ formats: ["qr_code"] });
+          saleCamera.running = true;
+          $("sale-camera-status").textContent = "Point the camera at an inventory QR label.";
+          detectSaleCode();
+        } else $("sale-camera-status").textContent = "Live scanning is unavailable in this browser. Capture a photo instead.";
+      } catch (error) {
+        stopSaleCamera();
+        notify(`Could not start the camera: ${error.message}. Upload a photo or enter the number.`, true);
+      }
+    });
+    $("sale-camera-stop").addEventListener("click", stopSaleCamera);
+    async function decodeSalePhoto(file) {
+      saleCamera.item = null;
+      $("sale-result").hidden = true;
+      const workspace = ui.workspace;
+      const data = new FormData();
+      data.append("file", file);
+      try {
+        const item = await api("/api/admin/labels/decode", { method: "POST", body: data });
+        if (workspace !== ui.workspace) return;
+        stopSaleCamera();
+        showSaleItem(item);
+      } catch (error) { notify(error.message, true); }
+    }
+    $("sale-camera-capture").addEventListener("click", () => {
+      const video = $("sale-camera-video");
+      const canvas = document.createElement("canvas");
+      canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+      if (!canvas.width || !canvas.height) { notify("The camera is not ready yet.", true); return; }
+      canvas.getContext("2d").drawImage(video, 0, 0);
+      canvas.toBlob((blob) => {
+        if (!blob) { notify("Could not capture the photo.", true); return; }
+        decodeSalePhoto(new File([blob], "label.jpg", { type: "image/jpeg" }));
+      }, "image/jpeg", 0.95);
+    });
+    $("sale-photo").addEventListener("change", () => {
+      const file = $("sale-photo").files[0];
+      if (file) decodeSalePhoto(file);
+      $("sale-photo").value = "";
+    });
+    $("sale-lookup-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      saleCamera.item = null;
+      $("sale-result").hidden = true;
+      try { await lookupSale($("sale-number").value); }
+      catch (error) { saleCamera.item = null; $("sale-result").hidden = true; notify(error.message, true); }
+    });
+    $("sale-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const item = saleCamera.item;
+      if (!item) return;
+      const button = $("sale-confirm");
+      button.disabled = true;
+      try {
+        const updated = await api(`/api/admin/items/${encodeURIComponent(item.id)}/scan-sale`, {
+          method: "POST", body: JSON.stringify({
+            quantity: Number($("sale-quantity").value), stock: $("sale-stock").value, expected_updated_at: item.updated_at,
+          }),
+        });
+        saleCamera.item = null;
+        $("sale-result").hidden = true;
+        notify(`Sale recorded for ${updated.name}. Available: ${updated.available_quantity}; reserved: ${updated.reserved_quantity}.`);
+        try { await refreshData(); }
+        catch (error) { notify(`Sale recorded, but refresh failed: ${error.message}. Reload the page.`, true); }
+      } catch (error) {
+        saleCamera.item = null;
+        $("sale-result").hidden = true;
+        notify(`${error.message} Find the item again before retrying.`, true);
+      } finally { button.disabled = false; }
+    });
+    window.addEventListener("pagehide", stopSaleCamera);
 
     initializeWorkspaces().catch((error) => notify(`Could not load your workspace: ${error.message}`, true));
   </script>

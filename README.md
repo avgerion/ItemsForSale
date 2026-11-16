@@ -104,6 +104,16 @@ The sign-in form protects the management page and admin API; HTTP Basic credenti
 
 The `/manage` workspace provides an inventory dashboard with listing search and category/status filters, item create/edit and publication controls, private storage notes, photo upload and visibility management, owner-managed categories, garage-sale event scheduling, and assisted intake. Product images can be explicitly published; package/barcode photos remain private. The dashboard and its API are protected by the configured accounts. Each account sees only its own workspace unless `INVENTORY_AGENT_OWNERS` explicitly grants access to another user's workspace.
 
+### Inventory labels and sales
+
+Each listing has a unique, permanent inventory number, separate from a manufacturer's UPC. Existing listings receive numbers when the updated database first starts. All units in a listing share its number; print as many copies as needed. Back up the database before upgrading and keep the updated database in backups: restoring a backup from before numbers were assigned can make later-printed labels unrecognizable.
+
+In **Inventory**, print an individual label or select listings and choose **Print selected**. The public catalog also offers owner sign-in and printing for an item or selected rows; private inventory is still accessible only to authorized users. Select a 2-by-2, 4-by-6, or 4-by-8 grid (columns by rows), or enter a custom grid, margins, gaps, copies, and starting position. These presets are grid counts, not guaranteed dimensions for a particular label product: match the settings to your stock. If the price or inventory number does not fit, choose a larger label. Preview on US Letter paper, print at **actual size / 100%**, disable fit-to-page and browser headers/footers, and test alignment on plain paper before using labels. The printer must support the configured printable margins.
+
+In **Scan sale**, use the camera to scan an inventory QR label live when the browser supports it. Otherwise capture or upload a label photo for local server-side decoding, or type the printed number. Camera access generally requires HTTPS on a phone; browser permissions and camera hardware also apply. No external barcode service is used, but the browser must be connected to this server.
+
+Review the item, choose available or reserved stock, enter the quantity sold, and confirm. An item with remaining available units stays in the public catalog; a depleted or sold listing does not. Re-scan if inventory changed before confirmation. An already-open public catalog is a snapshot and needs a refresh to reflect sales. The printed price is a snapshot too: reprint labels after a price change.
+
 ### Assisted intake and provider integrations
 
 Use **Assisted intake** to stage product, package, or barcode photos and manually enter/correct a UPC or manufacturer part number (MPN) before creating an inventory item. MPN is separate from Model. Staged photos stay on the server, are only available to signed-in admins, and expire after 48 hours. Discarding an intake deletes its staged photos.

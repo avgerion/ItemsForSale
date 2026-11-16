@@ -97,6 +97,16 @@ Create a small, phone-friendly inventory app for retail-return items. The owner 
 
 **Exit:** The app is usable in its intended setting and can be maintained without losing inventory data.
 
+### 5. Inventory labels and scan-to-sale
+
+- Assign each listing a stable inventory number distinct from its manufacturer barcode. A listing's units share the number and are tracked by quantity.
+- Generate QR labels locally for individual or selected listings on configurable US Letter grids, including 2-by-2, 4-by-6, and 4-by-8 presets.
+- Let an authorized owner/helper scan live where supported, capture a photo, or enter the number. Confirm the item, stock source (available or reserved), and quantity before recording a sale.
+- Apply sales atomically, reject stale reviews, and preserve the existing public visibility and workspace isolation rules.
+- Back up label identifiers with inventory and verify printed alignment and scanning on the intended printer and phones.
+
+**Exit:** A seller can label inventory and record a partial or complete sale without an external barcode service.
+
 ## First implementation slice
 
 Start with Milestone 1. Keep the first slice manual: an authenticated user can add an item, attach photos, set its condition and asking price, publish it, and find it through that user's public catalog. An agent relationship grants only the explicitly configured owner's workspace. This validates the data model and buyer experience before adding AI or paid/external integrations.

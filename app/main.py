@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import html
 import hmac
 import io
@@ -23,6 +24,7 @@ from urllib.parse import quote, urlsplit
 from bokeh.embed import components
 from bokeh.models import (
     BooleanFilter,
+    Button,
     CDSView,
     ColumnDataSource,
     CustomJS,
@@ -35,12 +37,13 @@ from bokeh.models import (
 from bokeh.resources import CDN
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageOps, UnidentifiedImageError
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from starlette.background import BackgroundTask
+import zxingcpp
 
 from .backups import configured_backup_directory, create_inventory_backup, save_server_backup
-from .database import DEFAULT_OWNER, INTAKE_UPLOAD_DIR, UPLOAD_DIR, connect_db, initialize_database, purge_expired_intakes
+from .database import DEFAULT_OWNER, INTAKE_UPLOAD_DIR, UPLOAD_DIR, connect_db, create_item_label, initialize_database, purge_expired_intakes
 from .providers import ProviderError, provider_statuses, run_provider
 from .security import (
     SESSION_COOKIE,
@@ -131,6 +134,20 @@ class ItemUpdate(BaseModel):
     private_notes: str | None = Field(default=None, max_length=5000)
     storage_location: str | None = Field(default=None, max_length=500)
     is_published: bool | None = None
+
+
+class LabelSelection(BaseModel):
+    item_ids: list[str] = Field(min_length=1, max_length=100)
+
+
+class LabelLookup(BaseModel):
+    item_number: str = Field(min_length=1, max_length=80)
+
+
+class ScannedSale(BaseModel):
+    quantity: int = Field(ge=1, le=100_000)
+    stock: Literal["available", "reserved"]
+    expected_updated_at: str = Field(min_length=1, max_length=80)
 
 
 class IntakeCreate(BaseModel):
@@ -311,6 +328,7 @@ def item_record(row: sqlite3.Row, *, include_private: bool) -> dict:
     if include_private:
         record.update(
             {
+                "item_number": row["item_number"],
                 "barcode": row["barcode"],
                 "manufacturer_part_number": row["manufacturer_part_number"],
                 "private_notes": row["private_notes"],
@@ -406,9 +424,10 @@ def intake_record(connection: sqlite3.Connection, intake_id: str, owner_username
 def fetch_item(connection: sqlite3.Connection, item_id: str, owner_username: str) -> sqlite3.Row:
     row = connection.execute(
         """
-        SELECT items.*, categories.name AS category
+        SELECT items.*, categories.name AS category, item_labels.item_number
         FROM items
         JOIN categories ON categories.id = items.category_id
+        JOIN item_labels ON item_labels.item_id = items.id
         WHERE items.id = ? AND items.owner_username = ?
         """,
         (item_id, owner_username),
@@ -462,6 +481,7 @@ def insert_inventory_item(
             now,
         ),
     )
+    create_item_label(connection, item_id)
     return item_id, item_record(fetch_item(connection, item_id, owner_username), include_private=True)
 
 
@@ -764,11 +784,17 @@ def catalog_page(owner_username: str) -> str:
         for item in listings
     ]
     contacts = []
+    label_links = []
     first_contact = next(
         (event for event in events if event["contact_phone"] or event["contact_email"]),
         None,
     )
     for item in listings:
+        label_url = f"/manage?owner={quote(owner_username, safe='')}&print_item={quote(item['id'], safe='')}"
+        label_links.append(
+            f'<a href="{html.escape(label_url, quote=True)}" '
+            'onclick="sessionStorage.setItem(\'items-for-sale-label-target\', this.search)">Print label</a>'
+        )
         links = []
         catalog_url = public_catalog_url(owner_username)
         message = f"Hi, I'm interested in {item['name']}."
@@ -797,6 +823,8 @@ def catalog_page(owner_username: str) -> str:
             "quantity": [str(item["available_quantity"]) for item in listings],
             "status": [item["availability_label"] for item in listings],
             "contact": contacts,
+            "item_id": [item["id"] for item in listings],
+            "label_link": label_links,
         }
     )
     filter_model = BooleanFilter(booleans=[True] * len(listings))
@@ -846,13 +874,25 @@ def catalog_page(owner_username: str) -> str:
             TableColumn(field="quantity", title="Available", width=90),
             TableColumn(field="status", title="Status", width=110),
             TableColumn(field="contact", title="Contact", width=110, formatter=HTMLTemplateFormatter(template="<%= value %>")),
+            TableColumn(field="label_link", title="Owner", width=100, formatter=HTMLTemplateFormatter(template="<%= value %>")),
         ],
         sizing_mode="stretch_width",
         height=460,
         index_position=None,
         autosize_mode="fit_viewport",
     )
-    script, div = components([search, category_filter, availability_filter, table])
+    print_selected = Button(label="Print selected labels (owner sign-in)", button_type="default")
+    print_selected.js_on_click(CustomJS(args={"source": source, "owner": owner_username}, code="""
+        const selected = source.selected.indices;
+        if (!selected.length) { window.alert("Select one or more items first."); return; }
+        const params = new URLSearchParams();
+        params.set("owner", owner);
+        selected.forEach((index) => params.append("print_item", source.data.item_id[index]));
+        sessionStorage.setItem("items-for-sale-label-target", params.toString());
+        window.location.assign("/manage");
+    """))
+    script, divs = components([search, category_filter, availability_filter, table, print_selected])
+    div = "".join(divs)
 
     event_cards = []
     for event in events:
@@ -1596,8 +1636,9 @@ def list_admin_items(
     with connect_db() as connection:
         rows = connection.execute(
             """
-            SELECT items.*, categories.name AS category
+            SELECT items.*, categories.name AS category, item_labels.item_number
             FROM items JOIN categories ON categories.id = items.category_id
+            JOIN item_labels ON item_labels.item_id = items.id
             WHERE items.owner_username = ? AND categories.owner_username = ?
             ORDER BY items.updated_at DESC
             """,
@@ -1660,6 +1701,95 @@ def list_admin_items(
     return result
 
 
+def lookup_label(connection: sqlite3.Connection, item_number: str, owner: str) -> sqlite3.Row:
+    row = connection.execute(
+        "SELECT items.id FROM items JOIN item_labels ON item_labels.item_id = items.id "
+        "WHERE item_labels.item_number = ? AND items.owner_username = ?",
+        (item_number.strip().upper(), owner),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Inventory label not found in this workspace")
+    return fetch_item(connection, row["id"], owner)
+
+
+@app.post("/api/admin/labels/print")
+def print_labels(
+    selection: LabelSelection, request: Request, username: Annotated[str, Depends(require_admin)]
+) -> list[dict]:
+    owner = workspace_owner(username, request)
+    if len(set(selection.item_ids)) != len(selection.item_ids):
+        raise HTTPException(status_code=422, detail="Select each listing only once")
+    labels = []
+    with connect_db() as connection:
+        for item_id in selection.item_ids:
+            row = fetch_item(connection, item_id, owner)
+            barcode = zxingcpp.write_barcode(
+                zxingcpp.BarcodeFormat.QRCode, row["item_number"], 256, 256, quiet_zone=4
+            )
+            image = Image.fromarray(barcode)
+            output = io.BytesIO()
+            image.save(output, format="PNG")
+            labels.append({
+                "id": item_id,
+                "item_number": row["item_number"],
+                "name": row["name"],
+                "price": money_from_cents(row["asking_price_cents"]),
+                "image": base64.b64encode(output.getvalue()).decode("ascii"),
+            })
+    return labels
+
+
+@app.post("/api/admin/labels/lookup")
+def find_label(
+    lookup: LabelLookup, request: Request, username: Annotated[str, Depends(require_admin)]
+) -> dict:
+    owner = workspace_owner(username, request)
+    with connect_db() as connection:
+        return item_record(lookup_label(connection, lookup.item_number, owner), include_private=True)
+
+
+@app.post("/api/admin/labels/decode")
+async def decode_label(
+    request: Request, username: Annotated[str, Depends(require_admin)], file: Annotated[UploadFile, File()]
+) -> dict:
+    owner = workspace_owner(username, request)
+    payload = await read_valid_image(file)
+    with Image.open(io.BytesIO(payload)) as image:
+        codes = {
+            code.text for code in zxingcpp.read_barcodes(ImageOps.exif_transpose(image))
+            if code.text.startswith("IFS1-")
+        }
+    if len(codes) != 1:
+        raise HTTPException(status_code=422, detail="The photo must contain exactly one readable inventory label")
+    with connect_db() as connection:
+        return item_record(lookup_label(connection, codes.pop(), owner), include_private=True)
+
+
+@app.post("/api/admin/items/{item_id}/scan-sale")
+def record_scanned_sale(
+    item_id: str, sale: ScannedSale, request: Request, username: Annotated[str, Depends(require_admin)]
+) -> dict:
+    owner = workspace_owner(username, request)
+    with connect_db() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = fetch_item(connection, item_id, owner)
+        if row["updated_at"] != sale.expected_updated_at:
+            raise HTTPException(status_code=409, detail="Inventory changed. Scan or look up the item again.")
+        available = row["quantity"] - row["reserved_quantity"] - row["sold_quantity"]
+        remaining = available if sale.stock == "available" else row["reserved_quantity"]
+        if sale.quantity > remaining:
+            raise HTTPException(status_code=409, detail=f"Only {remaining} {sale.stock} units remain")
+        reserved = row["reserved_quantity"] - (sale.quantity if sale.stock == "reserved" else 0)
+        sold = row["sold_quantity"] + sale.quantity
+        availability = normalize_availability(row["availability"], row["quantity"], reserved, sold)
+        connection.execute(
+            "UPDATE items SET reserved_quantity = ?, sold_quantity = ?, availability = ?, updated_at = ? "
+            "WHERE id = ? AND owner_username = ?",
+            (reserved, sold, availability, timestamp(), item_id, owner),
+        )
+        return item_record(fetch_item(connection, item_id, owner), include_private=True)
+
+
 @app.post("/api/admin/items", status_code=status.HTTP_201_CREATED)
 def create_item(
     item: ItemCreate,
@@ -1684,6 +1814,7 @@ def update_item(
     if not changes:
         raise HTTPException(status_code=422, detail="Provide at least one field to update")
     with connect_db() as connection:
+        connection.execute("BEGIN IMMEDIATE")
         existing = fetch_item(connection, item_id, owner)
         merged = {
             "name": existing["name"],
