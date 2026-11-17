@@ -303,7 +303,7 @@
                     </div>
                     <div id="camera-captures" style="display:flex;gap:.5rem;flex-wrap:wrap"></div>
                   </div>
-                  <p class="selection-hint">Choose photos by type. They are staged privately and are not sent to any external service in this workflow.</p>
+                  <p class="selection-hint">Choose photos by type. Staged photos remain private; dragging a web image may download it in your browser.</p>
                   <button class="button button-primary" type="submit" id="start-intake">Stage photos</button>
                 </form>
               </div>
@@ -537,14 +537,17 @@
         }
         if (!response.ok) throw new Error(`Image download failed (HTTP ${response.status}). Save it as a file and choose it instead.`);
         const type = (response.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
-        if (!photoTypes[type]) throw new Error("The dropped link did not return a JPEG, PNG, or WebP image. Save the image as a file instead.");
+        if (!Object.prototype.hasOwnProperty.call(photoTypes, type)) throw new Error("The dropped link did not return a JPEG, PNG, or WebP image. Save the image as a file instead.");
         if (Number(response.headers.get("content-length")) > maxPhotoBytes) throw new Error("Images must be at most 10 MB.");
         if (!response.body) throw new Error("The image download returned no data.");
         const reader = response.body.getReader();
         const chunks = [];
         let size = 0;
         while (true) {
-          const { value, done } = await reader.read();
+          let part;
+          try { part = await reader.read(); }
+          catch { throw new Error("The image download was interrupted. Save the image as a file and choose it instead."); }
+          const { value, done } = part;
           if (done) break;
           size += value.byteLength;
           if (size > maxPhotoBytes) {
@@ -556,6 +559,7 @@
         if (!size) throw new Error("The image download was empty.");
         return new File(chunks, `dropped-image.${photoTypes[type]}`, { type });
       } finally {
+        controller.abort();
         window.clearTimeout(timer);
       }
     }
@@ -581,6 +585,7 @@
           return;
         }
         const workspace = ui.workspace;
+        const selectedKind = scope === "intake" ? $("intake-drop-kind").value : "";
         const input = targetInput();
         const files = [...event.dataTransfer.files];
         const link = event.dataTransfer.getData("text/uri-list").split(/\r?\n/).find((line) => line && !line.startsWith("#"))
@@ -594,7 +599,7 @@
             files.push(await browserImageFile(link));
           }
           if (scope === "item" && files.length !== 1) throw new Error("Drop one photo at a time for an inventory item.");
-          if (files.some((file) => !photoTypes[file.type])) throw new Error("Only JPEG, PNG, and WebP images are supported.");
+          if (files.some((file) => !Object.prototype.hasOwnProperty.call(photoTypes, file.type))) throw new Error("Only JPEG, PNG, and WebP images are supported.");
           if (files.some((file) => !file.size || file.size > maxPhotoBytes)) throw new Error("Images must be nonempty and at most 10 MB.");
           if (ui.workspace !== workspace || (scope === "item" && $("photo-form").dataset.itemId !== itemId)) {
             throw new Error("The workspace or item changed. Drop the photo again.");
@@ -604,7 +609,7 @@
           files.forEach((file) => selection.items.add(file));
           input.files = selection.files;
           $(statusId).textContent = scope === "intake"
-            ? `Added ${files.length} photo${files.length === 1 ? "" : "s"} to ${input.id.split("-")[1]} photos.`
+            ? `Added ${files.length} photo${files.length === 1 ? "" : "s"} to ${selectedKind} photos.`
             : `Selected ${files[0].name}. Choose its type and upload it.`;
         } catch (error) {
           $(statusId).textContent = error.message;
@@ -1561,7 +1566,7 @@
 
     async function showPhotos(item) {
       if (ui.selectedItem?.id !== item.id) {
-        $("photo-file").value = "";
+        $("photo-form").reset();
         $("item-drop-status").textContent = "";
       }
       ui.selectedItem = item;
@@ -1840,7 +1845,7 @@
         stopCamera();
         await refreshData();
         await openIntake(intake.id);
-        notify("Intake staged privately. No external service was contacted.");
+        notify("Intake staged privately. No identification provider was contacted.");
       } catch (error) {
         await refreshData();
         notify(`Could not finish staging this intake: ${error.message}`, true);
