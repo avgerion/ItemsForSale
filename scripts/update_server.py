@@ -206,6 +206,14 @@ def main() -> int:
             str(APP_DIR / "requirements.txt"),
             timeout=1800,
         )
+        run_command(
+            "Setting application ownership", "chown", "-R", "root:items-for-sale",
+            str(APP_DIR / "app"), str(APP_DIR / ".venv"),
+        )
+        run_command(
+            "Setting application permissions", "chmod", "-R", "g+rX,g-w,o-rwx",
+            str(APP_DIR / "app"), str(APP_DIR / ".venv"),
+        )
         run_command("Starting the application", "/usr/bin/systemctl", "start", SERVICE_NAME)
         stopped = False
         wait_for_health()

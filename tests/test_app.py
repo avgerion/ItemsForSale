@@ -227,6 +227,45 @@ def test_system_update_is_owner_only_and_starts_the_fixed_service(
     assert denied.status_code == 403
 
 
+def test_system_update_restores_service_permissions_before_start(monkeypatch, tmp_path):
+    source = tmp_path / "source"
+    (source / ".git").mkdir(parents=True)
+    monkeypatch.setattr(update_server, "APP_DIR", source)
+    monkeypatch.setattr(update_server, "VENV_PYTHON", source / ".venv" / "bin" / "python")
+    monkeypatch.setattr(update_server, "UPDATE_HELPER", tmp_path / "helper.py")
+    monkeypatch.setattr(update_server.os, "geteuid", lambda: 0, raising=False)
+    monkeypatch.setattr(update_server.os, "chdir", lambda _: None)
+    monkeypatch.setattr(update_server.os, "chmod", lambda *_: None)
+    monkeypatch.setattr(update_server.shutil, "copyfile", lambda *_: None)
+    monkeypatch.setattr(update_server, "write_status", lambda *_: None)
+    monkeypatch.setattr(update_server, "create_data_backup", lambda: tmp_path / "backup.tar.gz")
+    monkeypatch.setattr(update_server, "wait_for_health", lambda: None)
+    monkeypatch.setattr(update_server.subprocess, "run", lambda *_, **__: SimpleNamespace(returncode=0))
+    calls = []
+
+    def fake_run(label, *args, **kwargs):
+        calls.append((label, args))
+        return {
+            "Checking the current branch": "main",
+            "Reading the installed commit": "old",
+            "Reading origin/main": "new",
+        }.get(label, "")
+
+    monkeypatch.setattr(update_server, "run_command", fake_run)
+
+    assert update_server.main() == 0
+    labels = [label for label, _ in calls]
+    assert labels.index("Installing application dependencies") < labels.index("Setting application ownership")
+    assert labels.index("Setting application ownership") < labels.index("Setting application permissions")
+    assert labels.index("Setting application permissions") < labels.index("Starting the application")
+    assert dict(calls)["Setting application ownership"] == (
+        "chown", "-R", "root:items-for-sale", str(source / "app"), str(source / ".venv")
+    )
+    assert dict(calls)["Setting application permissions"] == (
+        "chmod", "-R", "g+rX,g-w,o-rwx", str(source / "app"), str(source / ".venv")
+    )
+
+
 def test_system_update_backup_contains_data_without_archiving_itself(monkeypatch, tmp_path):
     source_dir = tmp_path / "source"
     source_dir.mkdir()

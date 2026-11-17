@@ -68,6 +68,7 @@ python3 -m venv "$APP_DIR/.venv"
 "$APP_DIR/.venv/bin/python" -m pip install -r "$APP_DIR/requirements.txt"
 chown -R "root:$APP_GROUP" "$APP_DIR"
 chmod -R o-rwx "$APP_DIR"
+chmod -R g+rX,g-w,o-rwx "$APP_DIR/app" "$APP_DIR/.venv"
 
 install -d -o root -g root -m 755 "$UPDATE_HELPER_DIR"
 install -o root -g root -m 755 "$APP_DIR/scripts/update_server.py" "$UPDATE_HELPER"

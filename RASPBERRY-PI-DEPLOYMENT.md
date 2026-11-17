@@ -148,6 +148,7 @@ sudo bash scripts/deploy.sh
 The script does **not** configure `.env` credentials, create the owner password hash, install/configure Caddy, set up DNS/router/firewall rules, enable production HTTPS checks, or mount/configure USB storage. It also does not run `git pull`. On an existing checkout, pull the desired commit yourself before running the script. It preserves an existing `.env` and existing app service unit.
 
 The source and virtual environment are root-owned and readable by the service group, so the app process cannot modify its code or dependencies. Keep runtime data and backups outside the source tree.
+The installer and updater restore service-group read/traverse access on the application and virtual environment after installing files, without making them writable by that group or accessible to other users.
 
 ## 4. Configure persistent application data and credentials
 
@@ -526,6 +527,7 @@ Schedule backups for a low-activity time. SQLite is copied with its online backu
 
 - Check services: `sudo systemctl status items-for-sale caddy --no-pager`.
 - Check app logs: `sudo journalctl -u items-for-sale -n 100 --no-pager`.
+- If `/manage` fails with permission denied on `app/templates/admin.html`, check `sudo namei -l /opt/items-for-sale/app/templates/admin.html`. For an older installation, restore the template with `sudo chown root:items-for-sale /opt/items-for-sale/app/templates/admin.html` and `sudo chmod 640 /opt/items-for-sale/app/templates/admin.html`. Install the latest deployment/updater code to prevent the same issue on later updates.
 - Check proxy/certificate logs: `sudo journalctl -u caddy -n 100 --no-pager`.
 - Check application data and USB free space: `df -h /mnt/items-for-sale`.
 - To install an update interactively, first test the changes locally, then commit and push them to `main`. Sign in as the configured default owner on the Pi and choose **Backups → Update server**. The updater refuses a dirty or diverged checkout, creates a full archive of the database and photos, fast-forwards to `origin/main`, installs the requirements, restarts the app, and checks `/health`. With this guide's configuration, update archives are stored in `/mnt/items-for-sale/backups`; `INVENTORY_UPDATE_BACKUP_MOUNT_DIR` identifies the actual USB mount and the update fails if it is absent. Without that setting, the configured backup directory itself must be a mount point. If `INVENTORY_BACKUP_DIR` is unset, the fallback is `/mnt/items-for-sale/data/system-update-backups`. Treat these archives as private data. This update action is disabled on local development hosts.
