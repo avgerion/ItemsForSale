@@ -142,7 +142,8 @@
     .intake-photos { grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); margin: 12px 0; }
     .intake-photos img { display: block; width: 100%; height: 84px; object-fit: cover; border-radius: 6px; background: #f0f1f3; }
     .photo-editor canvas { display: block; width: 100%; max-width: 640px; height: auto; touch-action: none; cursor: crosshair; }
-    .photo-editor .form-actions { margin: 10px 0; }
+    .photo-editor .form-actions { flex-wrap: wrap; margin: 10px 0; }
+    .photo-editor .button { min-height: 40px; }
     .candidate-card h3 { margin-bottom: 8px; }
     .candidate-field { display: grid; grid-template-columns: 20px minmax(80px, 110px) 1fr; align-items: start; gap: 7px; padding: 7px 0; border-top: 1px solid #eef0f2; font-size: 10px; overflow-wrap: anywhere; }
     .candidate-field input { margin: 1px 0 0; }
@@ -1222,6 +1223,7 @@
         }, "button-primary");
         appendAction(actions, "Cancel", () => editor.replaceChildren());
         redraw();
+        editor.scrollIntoView({ behavior: "smooth", block: "start" });
       } catch (error) {
         editor.replaceChildren();
         notify(`Could not open photo editor: ${error.message}`, true);
