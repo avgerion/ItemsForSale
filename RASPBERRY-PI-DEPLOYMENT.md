@@ -537,6 +537,8 @@ Schedule backups for a low-activity time. SQLite is copied with its online backu
   sudo bash /opt/items-for-sale/scripts/deploy.sh
   ```
 
+  To distinguish an older installed helper from a missing mount or directory, run `findmnt -T /mnt/items-for-sale`, `ls -ld /mnt/items-for-sale /mnt/items-for-sale/backups`, and `sudo grep -n INVENTORY_UPDATE_BACKUP_MOUNT_DIR /usr/local/lib/items-for-sale/update_server.py`. No grep output means the installed helper predates support for that setting; changing `.env` alone cannot update the helper. Follow the backup and one-time installation steps above after the fix is on `origin/main`.
+
   If a UI update fails, inspect `sudo journalctl -u items-for-sale-update -n 100 --no-pager` and `sudo journalctl -u items-for-sale -n 100 --no-pager`. The updater records the pre-update archive location in the admin status; it does not automatically roll back an unsuccessful code or database migration.
 - Apply OS and Caddy security updates regularly, and periodically test reboot, USB mount, and restore behavior.
 - If DNS resolves but certificate issuance fails, check DNS A/AAAA records, router forwarding, firewall rules, Caddy logs, correct system time, and whether the ISP blocks inbound traffic.

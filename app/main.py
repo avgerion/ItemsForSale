@@ -1802,6 +1802,25 @@ def create_item(
         return record
 
 
+@app.delete("/api/admin/items/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_item(
+    item_id: str,
+    request: Request,
+    username: Annotated[str, Depends(require_admin)],
+) -> Response:
+    owner = workspace_owner(username, request)
+    with connect_db() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        fetch_item(connection, item_id, owner)
+        photos = connection.execute(
+            "SELECT filename FROM item_photos WHERE item_id = ?", (item_id,)
+        ).fetchall()
+        connection.execute("DELETE FROM items WHERE id = ? AND owner_username = ?", (item_id, owner))
+        for photo in photos:
+            (UPLOAD_DIR / photo["filename"]).unlink(missing_ok=True)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @app.patch("/api/admin/items/{item_id}")
 def update_item(
     item_id: str,

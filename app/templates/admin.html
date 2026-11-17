@@ -141,6 +141,8 @@
     .intake-card p, .candidate-card p { color: var(--muted); font-size: 10px; line-height: 1.5; margin: 4px 0 0; }
     .intake-photos { grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); margin: 12px 0; }
     .intake-photos img { display: block; width: 100%; height: 84px; object-fit: cover; border-radius: 6px; background: #f0f1f3; }
+    .photo-editor canvas { display: block; width: 100%; max-width: 640px; height: auto; touch-action: none; cursor: crosshair; }
+    .photo-editor .form-actions { margin: 10px 0; }
     .candidate-card h3 { margin-bottom: 8px; }
     .candidate-field { display: grid; grid-template-columns: 20px minmax(80px, 110px) 1fr; align-items: start; gap: 7px; padding: 7px 0; border-top: 1px solid #eef0f2; font-size: 10px; overflow-wrap: anywhere; }
     .candidate-field input { margin: 1px 0 0; }
@@ -604,6 +606,7 @@
         appendAction(actionGroup, "Edit", () => editItem(item));
         appendAction(actionGroup, `Photos${item.photos.length ? ` (${item.photos.length})` : ""}`, () => showPhotos(item));
         appendAction(actionGroup, "Print label", () => openLabels([item.id]));
+        appendAction(actionGroup, "Delete", () => deleteItem(item), "button-danger");
         actions.appendChild(actionGroup);
         row.appendChild(actions);
         body.appendChild(row);
@@ -803,9 +806,13 @@
         photoChoiceText.textContent = "Select for next local or vision run";
         photoChoice.append(photoCheckbox, photoChoiceText);
         figure.append(image, caption, photoChoice);
+        appendAction(figure, "Crop / rotate", () => openPhotoEditor(intake, photo));
         photoGrid.appendChild(figure);
       });
       content.appendChild(photoGrid);
+      const photoEditor = document.createElement("div");
+      photoEditor.id = "intake-photo-editor";
+      content.appendChild(photoEditor);
 
       const identifiers = document.createElement("form");
       identifiers.className = "intake-identifiers";
@@ -1116,6 +1123,111 @@
       content.appendChild(actions);
     }
 
+    async function openPhotoEditor(intake, photo) {
+      const editor = $("intake-photo-editor");
+      editor.replaceChildren();
+      editor.className = "photo-editor";
+      const help = document.createElement("p");
+      help.textContent = "Drag over the image to select a crop, or leave it unselected to keep the whole image. Rotate first, then select the area. The original stays unchanged.";
+      const canvas = document.createElement("canvas");
+      canvas.setAttribute("aria-label", "Photo crop selection; drag to select an area");
+      const actions = document.createElement("div");
+      actions.className = "form-actions";
+      editor.append(help, canvas, actions);
+      try {
+        const image = new Image();
+        image.src = photo.url;
+        await image.decode();
+        if (!editor.isConnected) return;
+        let source = document.createElement("canvas");
+        source.width = image.naturalWidth;
+        source.height = image.naturalHeight;
+        source.getContext("2d").drawImage(image, 0, 0);
+        let selection = null;
+        let start = null;
+        const redraw = () => {
+          canvas.width = source.width;
+          canvas.height = source.height;
+          const context = canvas.getContext("2d");
+          context.drawImage(source, 0, 0);
+          if (selection) {
+            context.strokeStyle = "#ffcc00";
+            context.lineWidth = Math.max(2, source.width / 300);
+            context.strokeRect(selection.x, selection.y, selection.width, selection.height);
+          }
+        };
+        const point = (event) => {
+          const bounds = canvas.getBoundingClientRect();
+          return {
+            x: Math.max(0, Math.min(source.width, (event.clientX - bounds.left) * source.width / bounds.width)),
+            y: Math.max(0, Math.min(source.height, (event.clientY - bounds.top) * source.height / bounds.height)),
+          };
+        };
+        canvas.addEventListener("pointerdown", (event) => {
+          start = point(event);
+          selection = null;
+          canvas.setPointerCapture(event.pointerId);
+          redraw();
+        });
+        canvas.addEventListener("pointermove", (event) => {
+          if (!start) return;
+          const end = point(event);
+          selection = {
+            x: Math.min(start.x, end.x), y: Math.min(start.y, end.y),
+            width: Math.abs(end.x - start.x), height: Math.abs(end.y - start.y),
+          };
+          redraw();
+        });
+        canvas.addEventListener("pointerup", () => {
+          start = null;
+          if (selection && (selection.width < 1 || selection.height < 1)) selection = null;
+          redraw();
+        });
+        canvas.addEventListener("pointercancel", () => { start = null; selection = null; redraw(); });
+        const rotate = (direction) => {
+          const rotated = document.createElement("canvas");
+          rotated.width = source.height;
+          rotated.height = source.width;
+          const context = rotated.getContext("2d");
+          context.translate(rotated.width / 2, rotated.height / 2);
+          context.rotate(direction * Math.PI / 2);
+          context.drawImage(source, -source.width / 2, -source.height / 2);
+          source = rotated;
+          selection = null;
+          redraw();
+        };
+        appendAction(actions, "Rotate left", () => rotate(-1));
+        appendAction(actions, "Rotate right", () => rotate(1));
+        appendAction(actions, "Clear crop", () => { selection = null; redraw(); });
+        appendAction(actions, "Save edited copy", async (event) => {
+          const button = event.currentTarget;
+          button.disabled = true;
+          try {
+            const crop = selection || { x: 0, y: 0, width: source.width, height: source.height };
+            const result = document.createElement("canvas");
+            result.width = Math.max(1, Math.round(crop.width));
+            result.height = Math.max(1, Math.round(crop.height));
+            result.getContext("2d").drawImage(source, crop.x, crop.y, crop.width, crop.height, 0, 0, result.width, result.height);
+            const blob = await new Promise((resolve) => result.toBlob(resolve, "image/jpeg", 0.95));
+            if (!blob) throw new Error("The browser could not create the edited image.");
+            const form = new FormData();
+            form.append("file", blob, "edited-photo.jpg");
+            form.append("kind", photo.kind);
+            await api(`/api/admin/intakes/${encodeURIComponent(intake.id)}/photos`, { method: "POST", body: form });
+            await refreshData();
+            await openIntake(intake.id);
+            notify("Edited copy staged. Select it for the next local or vision run.");
+          } catch (error) { notify(error.message, true); }
+          finally { button.disabled = false; }
+        }, "button-primary");
+        appendAction(actions, "Cancel", () => editor.replaceChildren());
+        redraw();
+      } catch (error) {
+        editor.replaceChildren();
+        notify(`Could not open photo editor: ${error.message}`, true);
+      }
+    }
+
     async function openIntake(intakeId) {
       try {
         const intake = await api(`/api/admin/intakes/${encodeURIComponent(intakeId)}`);
@@ -1324,6 +1436,24 @@
         await api(`/api/admin/events/${encodeURIComponent(event.id)}`, { method: "DELETE" });
         await refreshData();
         notify("Sale event deleted.");
+      } catch (error) { notify(error.message, true); }
+    }
+
+    async function deleteItem(item) {
+      if (!window.confirm(`Permanently delete "${item.name}" and its photos, label, and research? This cannot be undone.`)) return;
+      try {
+        await api(`/api/admin/items/${encodeURIComponent(item.id)}`, { method: "DELETE" });
+        labelSelection.delete(item.id);
+        invalidateLabels();
+        if ($("item-id").value === item.id) resetItemForm();
+        if (ui.selectedItem?.id === item.id) {
+          ui.selectedItem = null;
+          $("photo-form").removeAttribute("data-item-id");
+          $("photo-item-name").textContent = "Select an item to manage photos";
+          $("photo-gallery").replaceChildren();
+        }
+        await refreshData();
+        notify("Item and its photos deleted.");
       } catch (error) { notify(error.message, true); }
     }
 

@@ -250,6 +250,7 @@ def test_system_update_backup_contains_data_without_archiving_itself(monkeypatch
     assert any(name.endswith("uploads/item.jpg") for name in member_names)
     assert any(name.endswith("intake/intake.jpg") for name in member_names)
     assert not any("system-update-backups" in name for name in member_names)
+    assert update_server.create_data_backup().is_file()
 
 
 def test_system_update_backup_accepts_subdirectory_of_explicit_mount(monkeypatch, tmp_path):
@@ -538,6 +539,25 @@ def test_owner_workspaces_are_isolated_and_agents_can_edit_granted_workspaces(
     ]
     assert "Owner-only item" not in client.get("/catalog/seller").text
     assert "Seller-only item" in client.get("/catalog/seller").text
+
+    assert client.delete(f"/api/admin/items/{seller_item['id']}").status_code == 401
+    assert client.delete(
+        f"/api/admin/items/{seller_item['id']}", headers=owner_headers
+    ).status_code == 404
+    assert client.get(f"/media/{seller_photo_id}?owner=seller").status_code == 200
+    assert client.delete(
+        f"/api/admin/items/{seller_item['id']}", headers=agent_workspace_headers
+    ).status_code == 204
+    assert client.get(f"/media/{seller_photo_id}?owner=seller").status_code == 404
+    assert client.get("/api/public/items", params={"owner": "seller"}).json() == []
+    assert not (database.UPLOAD_DIR / f"{seller_photo_id}.jpg").exists()
+    with database.connect_db() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM item_labels WHERE item_id = ?", (seller_item["id"],)
+        ).fetchone()[0] == 0
+    assert client.delete(
+        f"/api/admin/items/{seller_item['id']}", headers=seller_headers
+    ).status_code == 404
 
 
 def test_workspace_backup_excludes_other_users_inventory(client, admin_headers, monkeypatch, tmp_path):

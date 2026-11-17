@@ -106,7 +106,7 @@ def create_data_backup() -> Path:
         if not backup_dir.is_dir() or not os.path.ismount(backup_mount):
             raise UpdateError("The configured server backup directory is not mounted")
     else:
-        backup_dir.mkdir(parents=True)
+        backup_dir.mkdir(parents=True, exist_ok=True)
     if not backup_dir.is_dir():
         raise UpdateError("The configured update backup location is not a directory")
 

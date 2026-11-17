@@ -104,6 +104,8 @@ The sign-in form protects the management page and admin API; HTTP Basic credenti
 
 The `/manage` workspace provides an inventory dashboard with listing search and category/status filters, item create/edit and publication controls, private storage notes, photo upload and visibility management, owner-managed categories, garage-sale event scheduling, and assisted intake. Product images can be explicitly published; package/barcode photos remain private. The dashboard and its API are protected by the configured accounts. Each account sees only its own workspace unless `INVENTORY_AGENT_OWNERS` explicitly grants access to another user's workspace.
 
+Inventory's **Delete** action permanently removes a listing, its photos, label, and research after confirmation. A granted helper can delete items in the workspace they can manage; use backups if a deletion must be recovered.
+
 ### Inventory labels and sales
 
 Each listing has a unique, permanent inventory number, separate from a manufacturer's UPC. Existing listings receive numbers when the updated database first starts. All units in a listing share its number; print as many copies as needed. Back up the database before upgrading and keep the updated database in backups: restoring a backup from before numbers were assigned can make later-printed labels unrecognizable.
@@ -117,6 +119,8 @@ Review the item, choose available or reserved stock, enter the quantity sold, an
 ### Assisted intake and provider integrations
 
 Use **Assisted intake** to stage product, package, or barcode photos and manually enter/correct a UPC or manufacturer part number (MPN) before creating an inventory item. MPN is separate from Model. Staged photos stay on the server, are only available to signed-in admins, and expire after 48 hours. Discarding an intake deletes its staged photos.
+
+In intake review, choose **Crop / rotate** on a photo. Rotate in 90-degree steps, then drag around the text or barcode and save an edited copy. The original remains available; select the edited copy for the next local scan. Both copies are transferred privately to an item draft. Cropping can improve recognition, but OCR and barcode suggestions still need manual verification.
 
 Choose exactly one live method per run; results are appended so you can compare sources in sequence. Methods are selectable when their required input is present. Configure any required credentials or local software in `.env`; unconfigured methods report what setup is needed when run. For a live vision request, explicitly check the photos to send; unchecked photos are not included in the request. Local barcode/OCR processing runs on the server. Catalog and eBay requests use only entered identifiers and do not transmit photos.
 
