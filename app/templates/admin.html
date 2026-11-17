@@ -1129,12 +1129,30 @@
       editor.replaceChildren();
       editor.className = "photo-editor";
       const help = document.createElement("p");
-      help.textContent = "Drag over the image to select a crop, or leave it unselected to keep the whole image. Rotate first, then select the area. The original stays unchanged.";
+      help.textContent = "Rotate first, then drag over the image to select a crop. Changing the angle clears the crop. The original stays unchanged.";
+      const angleLabel = document.createElement("label");
+      angleLabel.className = "field";
+      angleLabel.textContent = "Rotation angle (degrees, -180 to 180)";
+      const angleInput = document.createElement("input");
+      angleInput.className = "control";
+      angleInput.type = "number";
+      angleInput.min = "-180";
+      angleInput.max = "180";
+      angleInput.step = "any";
+      angleInput.value = "0";
+      angleLabel.appendChild(angleInput);
+      const angleSlider = document.createElement("input");
+      angleSlider.type = "range";
+      angleSlider.min = "-180";
+      angleSlider.max = "180";
+      angleSlider.step = "0.1";
+      angleSlider.value = "0";
+      angleSlider.setAttribute("aria-label", "Adjust rotation angle");
       const canvas = document.createElement("canvas");
       canvas.setAttribute("aria-label", "Photo crop selection; drag to select an area");
       const actions = document.createElement("div");
       actions.className = "form-actions";
-      editor.append(help, canvas, actions);
+      editor.append(help, angleLabel, angleSlider, canvas, actions);
       try {
         const image = new Image();
         image.src = photo.url;
@@ -1146,6 +1164,7 @@
         source.getContext("2d").drawImage(image, 0, 0);
         let selection = null;
         let start = null;
+        let angle = 0;
         const redraw = () => {
           canvas.width = source.width;
           canvas.height = source.height;
@@ -1185,30 +1204,61 @@
           redraw();
         });
         canvas.addEventListener("pointercancel", () => { start = null; selection = null; redraw(); });
-        const rotate = (direction) => {
+        const rotate = (degrees) => {
+          angle = degrees;
+          angleInput.value = String(angle);
+          angleSlider.value = String(angle);
+          const radians = angle * Math.PI / 180;
+          const cardinal = angle % 90 === 0;
+          const cosine = cardinal ? Math.round(Math.cos(radians)) : Math.cos(radians);
+          const sine = cardinal ? Math.round(Math.sin(radians)) : Math.sin(radians);
           const rotated = document.createElement("canvas");
-          rotated.width = source.height;
-          rotated.height = source.width;
+          rotated.width = Math.ceil(Math.abs(image.naturalWidth * cosine) + Math.abs(image.naturalHeight * sine));
+          rotated.height = Math.ceil(Math.abs(image.naturalWidth * sine) + Math.abs(image.naturalHeight * cosine));
           const context = rotated.getContext("2d");
+          context.fillStyle = "white";
+          context.fillRect(0, 0, rotated.width, rotated.height);
           context.translate(rotated.width / 2, rotated.height / 2);
-          context.rotate(direction * Math.PI / 2);
-          context.drawImage(source, -source.width / 2, -source.height / 2);
+          context.rotate(radians);
+          context.drawImage(image, -image.naturalWidth / 2, -image.naturalHeight / 2);
           source = rotated;
           selection = null;
+          start = null;
           redraw();
         };
-        appendAction(actions, "Rotate left", () => rotate(-1));
-        appendAction(actions, "Rotate right", () => rotate(1));
+        angleSlider.addEventListener("input", () => rotate(Number(angleSlider.value)));
+        angleInput.addEventListener("change", () => {
+          if (!angleInput.value || !angleInput.validity.valid) {
+            notify("Enter a rotation angle between -180 and 180 degrees.", true);
+            return;
+          }
+          rotate(Number(angleInput.value));
+        });
+        const rotateQuarterTurn = (direction) => {
+          let next = angle + direction * 90;
+          if (next > 180) next -= 360;
+          if (next < -180) next += 360;
+          rotate(next);
+        };
+        appendAction(actions, "Rotate left", () => rotateQuarterTurn(-1));
+        appendAction(actions, "Rotate right", () => rotateQuarterTurn(1));
         appendAction(actions, "Clear crop", () => { selection = null; redraw(); });
         appendAction(actions, "Save edited copy", async (event) => {
           const button = event.currentTarget;
+          if (!angleInput.value || !angleInput.validity.valid) {
+            notify("Enter a rotation angle between -180 and 180 degrees.", true);
+            return;
+          }
           button.disabled = true;
           try {
             const crop = selection || { x: 0, y: 0, width: source.width, height: source.height };
             const result = document.createElement("canvas");
             result.width = Math.max(1, Math.round(crop.width));
             result.height = Math.max(1, Math.round(crop.height));
-            result.getContext("2d").drawImage(source, crop.x, crop.y, crop.width, crop.height, 0, 0, result.width, result.height);
+            const resultContext = result.getContext("2d");
+            resultContext.fillStyle = "white";
+            resultContext.fillRect(0, 0, result.width, result.height);
+            resultContext.drawImage(source, crop.x, crop.y, crop.width, crop.height, 0, 0, result.width, result.height);
             const blob = await new Promise((resolve) => result.toBlob(resolve, "image/jpeg", 0.95));
             if (!blob) throw new Error("The browser could not create the edited image.");
             const form = new FormData();
