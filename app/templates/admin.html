@@ -123,6 +123,8 @@
     .photo-card img { display: block; width: 100%; height: 94px; object-fit: cover; border-radius: 6px; background: #f0f1f3; }
     .photo-card p { margin: 7px 0; color: #69727d; font-size: 10px; }
     .photo-card .button { margin: 2px 3px 2px 0; }
+    .photo-drop { border: 2px dashed #aab8ad; border-radius: 8px; padding: 16px; margin: 10px 0; color: #485a4c; background: #f7faf7; font-size: 12px; text-align: center; }
+    .photo-drop.dragging { border-color: var(--accent); background: var(--soft-green); }
     .section { display: none; }
     .section.active { display: block; }
     .section-tabs { display: flex; flex-wrap: wrap; gap: 5px; }
@@ -287,6 +289,9 @@
                   <label class="field">Product photos<input class="control" id="intake-product-files" type="file" accept="image/jpeg,image/png,image/webp" multiple></label>
                   <label class="field">Package photos<input class="control" id="intake-package-files" type="file" accept="image/jpeg,image/png,image/webp" multiple></label>
                   <label class="field">Barcode photos<input class="control" id="intake-barcode-files" type="file" accept="image/jpeg,image/png,image/webp" multiple></label>
+                  <label class="field">Type for dropped photos<select class="control" id="intake-drop-kind"><option value="product">Product</option><option value="package">Package</option><option value="barcode">Barcode</option></select></label>
+                  <div class="photo-drop" id="intake-photo-drop">Drop photo files or an image from another browser window here.</div>
+                  <p class="selection-hint" id="intake-drop-status" role="status"></p>
                   <div id="camera-section" hidden>
                     <label class="field">Camera<select class="control" id="camera-select"></select></label>
                     <label class="field">Photo type<select class="control" id="camera-kind"><option value="product">Product</option><option value="package">Package</option><option value="barcode">Barcode</option></select></label>
@@ -365,6 +370,8 @@
                 <div class="panel-body">
                   <form id="photo-form">
                     <label class="field">Choose photo<input class="control" type="file" id="photo-file" accept="image/jpeg,image/png,image/webp" required></label>
+                    <div class="photo-drop" id="item-photo-drop">Drop a photo file or an image from another browser window here.</div>
+                    <p class="selection-hint" id="item-drop-status" role="status"></p>
                     <div class="form-grid">
                       <label class="field">Photo type<select class="control" id="photo-kind"><option value="product">Product photo</option><option value="package">Package photo</option><option value="barcode">Barcode photo</option></select></label>
                       <label class="field-check"><input type="checkbox" id="photo-public"> Public product photo</label>
@@ -507,6 +514,114 @@
       window.clearTimeout(ui.noticeTimer);
       ui.noticeTimer = window.setTimeout(() => notice.classList.remove("show"), 5000);
     }
+
+    const maxPhotoBytes = 10 * 1024 * 1024;
+    const photoTypes = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp" };
+    const photoDropsPending = { intake: false, item: false };
+
+    async function browserImageFile(rawUrl) {
+      let url;
+      try { url = new URL(rawUrl); }
+      catch { throw new Error("Drop an image file or a direct image URL."); }
+      if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) {
+        throw new Error("Only HTTP or HTTPS image links without credentials are supported.");
+      }
+      const controller = new AbortController();
+      const timer = window.setTimeout(() => controller.abort(), 15000);
+      try {
+        let response;
+        try {
+          response = await fetch(url.href, { credentials: "omit", referrerPolicy: "no-referrer", signal: controller.signal });
+        } catch {
+          throw new Error("Could not access that image. The website or browser may block it; save the image as a file and choose it instead.");
+        }
+        if (!response.ok) throw new Error(`Image download failed (HTTP ${response.status}). Save it as a file and choose it instead.`);
+        const type = (response.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+        if (!photoTypes[type]) throw new Error("The dropped link did not return a JPEG, PNG, or WebP image. Save the image as a file instead.");
+        if (Number(response.headers.get("content-length")) > maxPhotoBytes) throw new Error("Images must be at most 10 MB.");
+        if (!response.body) throw new Error("The image download returned no data.");
+        const reader = response.body.getReader();
+        const chunks = [];
+        let size = 0;
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          size += value.byteLength;
+          if (size > maxPhotoBytes) {
+            controller.abort();
+            throw new Error("Images must be at most 10 MB.");
+          }
+          chunks.push(value);
+        }
+        if (!size) throw new Error("The image download was empty.");
+        return new File(chunks, `dropped-image.${photoTypes[type]}`, { type });
+      } finally {
+        window.clearTimeout(timer);
+      }
+    }
+
+    function setupPhotoDrop(zoneId, statusId, buttonId, scope, targetInput) {
+      const zone = $(zoneId);
+      zone.addEventListener("dragover", (event) => {
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "copy";
+        zone.classList.add("dragging");
+      });
+      zone.addEventListener("dragleave", () => zone.classList.remove("dragging"));
+      zone.addEventListener("drop", async (event) => {
+        event.preventDefault();
+        zone.classList.remove("dragging");
+        if (photoDropsPending[scope] || $(buttonId).disabled) {
+          notify("Wait for the current photo operation to finish.", true);
+          return;
+        }
+        const itemId = $("photo-form").dataset.itemId;
+        if (scope === "item" && !itemId) {
+          notify("Select an inventory item before dropping its photo.", true);
+          return;
+        }
+        const workspace = ui.workspace;
+        const input = targetInput();
+        const files = [...event.dataTransfer.files];
+        const link = event.dataTransfer.getData("text/uri-list").split(/\r?\n/).find((line) => line && !line.startsWith("#"))
+          || event.dataTransfer.getData("text/plain").trim();
+        photoDropsPending[scope] = true;
+        $(buttonId).disabled = true;
+        $(statusId).textContent = files.length ? "Checking dropped photos…" : "Loading dropped image…";
+        try {
+          if (!files.length) {
+            if (!link) throw new Error("No image was dropped. Choose a JPEG, PNG, or WebP file instead.");
+            files.push(await browserImageFile(link));
+          }
+          if (scope === "item" && files.length !== 1) throw new Error("Drop one photo at a time for an inventory item.");
+          if (files.some((file) => !photoTypes[file.type])) throw new Error("Only JPEG, PNG, and WebP images are supported.");
+          if (files.some((file) => !file.size || file.size > maxPhotoBytes)) throw new Error("Images must be nonempty and at most 10 MB.");
+          if (ui.workspace !== workspace || (scope === "item" && $("photo-form").dataset.itemId !== itemId)) {
+            throw new Error("The workspace or item changed. Drop the photo again.");
+          }
+          const selection = new DataTransfer();
+          if (scope === "intake") [...input.files].forEach((file) => selection.items.add(file));
+          files.forEach((file) => selection.items.add(file));
+          input.files = selection.files;
+          $(statusId).textContent = scope === "intake"
+            ? `Added ${files.length} photo${files.length === 1 ? "" : "s"} to ${input.id.split("-")[1]} photos.`
+            : `Selected ${files[0].name}. Choose its type and upload it.`;
+        } catch (error) {
+          $(statusId).textContent = error.message;
+          notify(error.message, true);
+        } finally {
+          photoDropsPending[scope] = false;
+          $(buttonId).disabled = false;
+        }
+      });
+    }
+
+    setupPhotoDrop("intake-photo-drop", "intake-drop-status", "start-intake", "intake",
+      () => $(`intake-${$("intake-drop-kind").value}-files`));
+    setupPhotoDrop("item-photo-drop", "item-drop-status", "upload-photo", "item", () => $("photo-file"));
+    $("photo-file").addEventListener("change", () => { $("item-drop-status").textContent = ""; });
+    ["product", "package", "barcode"].forEach((kind) =>
+      $(`intake-${kind}-files`).addEventListener("change", () => { $("intake-drop-status").textContent = ""; }));
 
     function showView(name) {
       if (name !== "scan") stopSaleCamera();
@@ -1373,6 +1488,12 @@
         $("sale-result").hidden = true;
         labelSelection.clear();
         invalidateLabels();
+        ui.selectedItem = null;
+        $("photo-form").reset();
+        $("photo-form").removeAttribute("data-item-id");
+        $("item-drop-status").textContent = "";
+        $("photo-item-name").textContent = "Select an item to manage photos";
+        $("photo-gallery").replaceChildren();
         ui.workspace = select.value;
         window.localStorage.setItem("items-for-sale-workspace", ui.workspace);
         updateWorkspaceLinks();
@@ -1439,6 +1560,10 @@
     }
 
     async function showPhotos(item) {
+      if (ui.selectedItem?.id !== item.id) {
+        $("photo-file").value = "";
+        $("item-drop-status").textContent = "";
+      }
       ui.selectedItem = item;
       $("photo-item-name").textContent = item.name;
       $("photo-form").dataset.itemId = item.id;
@@ -1501,6 +1626,8 @@
         if (ui.selectedItem?.id === item.id) {
           ui.selectedItem = null;
           $("photo-form").removeAttribute("data-item-id");
+          $("photo-file").value = "";
+          $("item-drop-status").textContent = "";
           $("photo-item-name").textContent = "Select an item to manage photos";
           $("photo-gallery").replaceChildren();
         }
@@ -1669,6 +1796,7 @@
 
     $("intake-form").addEventListener("submit", async (event) => {
       event.preventDefault();
+      if (photoDropsPending.intake) { notify("Wait for the dropped image to finish loading.", true); return; }
       const files = [
         ...camera.captures.map(({ file, kind }) => ({ file, kind })),
         ...[...$("intake-product-files").files].map((file) => ({ file, kind: "product" })),
@@ -1705,6 +1833,7 @@
           await api(`/api/admin/intakes/${encodeURIComponent(intake.id)}/photos`, { method: "POST", body: form });
         }
         $("intake-form").reset();
+        $("intake-drop-status").textContent = "";
         camera.captures.forEach((capture) => URL.revokeObjectURL(capture.url));
         camera.captures = [];
         renderCaptures();
@@ -1720,6 +1849,7 @@
 
     $("photo-form").addEventListener("submit", async (event) => {
       event.preventDefault();
+      if (photoDropsPending.item) { notify("Wait for the dropped image to finish loading.", true); return; }
       const itemId = $("photo-form").dataset.itemId;
       if (!itemId) { notify("Save the item first, then select it from inventory to add photos.", true); return; }
       const file = $("photo-file").files[0];
@@ -1733,6 +1863,7 @@
         await api(`/api/admin/items/${encodeURIComponent(itemId)}/photos`, { method: "POST", body: form });
         await refreshData();
         $("photo-form").reset();
+        $("item-drop-status").textContent = "";
         await showPhotos(ui.items.find((item) => item.id === itemId));
         notify("Photo uploaded.");
       } catch (error) { notify(error.message, true); }

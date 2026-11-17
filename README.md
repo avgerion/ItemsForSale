@@ -104,6 +104,8 @@ The sign-in form protects the management page and admin API; HTTP Basic credenti
 
 The `/manage` workspace provides an inventory dashboard with listing search and category/status filters, item create/edit and publication controls, private storage notes, photo upload and visibility management, owner-managed categories, garage-sale event scheduling, and assisted intake. Product images can be explicitly published; package/barcode photos remain private. The dashboard and its API are protected by the configured accounts. Each account sees only its own workspace unless `INVENTORY_AGENT_OWNERS` explicitly grants access to another user's workspace.
 
+Drop JPEG, PNG, or WebP files onto the photo drop areas in **Assisted intake** or **Inventory → Photos**, or use the existing file picker. In intake, choose the photo type before dropping; in inventory, select an item and upload one photo at a time. Dropped files are not uploaded until you stage the intake or choose **Upload photo**. For an image dragged from another website, the browser may need to download its direct image URL; some sites or browsers block this. If it fails, save the image to your device and choose or drop that file instead. Only explicitly marked product photos can be public.
+
 Inventory's **Delete** action permanently removes a listing, its photos, label, and research after confirmation. A granted helper can delete items in the workspace they can manage; use backups if a deletion must be recovered.
 
 ### Inventory labels and sales
