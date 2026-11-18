@@ -360,6 +360,18 @@
                       <label class="field field-wide">Private notes<textarea class="control" id="private_notes" rows="2" maxlength="5000" placeholder="Notes for you and your helpers"></textarea></label>
                       <label class="field-check field-wide"><input type="checkbox" id="is_published"> Publish this listing in the public catalog</label>
                     </div>
+                    <section id="item-store-references" hidden>
+                      <h3>Store references <span class="badge badge-gray">Private</span></h3>
+                      <p class="selection-hint">Add a store product number, a product-page URL, or both. Search identifiers are the terms used to find previously confirmed links.</p>
+                      <div id="item-store-reference-list" class="product-link-list"></div>
+                      <datalist id="store-names"><option value="lowes">Lowe's</option><option value="home_depot">Home Depot</option><option value="ebay">eBay</option><option value="amazon">Amazon</option></datalist>
+                      <button class="button" type="button" id="add-store-reference">Add store reference</button>
+                    </section>
+                    <section id="item-evidence-links" hidden>
+                      <h3>Price evidence source links <span class="badge badge-gray">Private</span></h3>
+                      <p class="selection-hint">Correct the source URL without changing the saved price, source, or retrieval date.</p>
+                      <div id="item-evidence-link-list"></div>
+                    </section>
                     <input type="hidden" id="item-intake-id">
                     <div class="form-actions"><button class="button button-primary" type="submit" id="save-item">Save item</button><button class="button" type="button" id="print-edit-item">Print label</button><button class="button" type="button" id="cancel-edit">Clear</button></div>
                   </form>
@@ -502,6 +514,7 @@
       if (!response.ok) {
         let detail = response.statusText;
         try { detail = (await response.json()).detail || detail; } catch {}
+        if (Array.isArray(detail)) detail = detail.map((entry) => entry.msg || "Invalid input").join("; ");
         throw new Error(detail);
       }
       return response.status === 204 ? null : response.json();
@@ -666,7 +679,7 @@
       const category = $("item-category-filter").value;
       const status = $("item-status-filter").value;
       return ui.items.filter((item) => {
-        const searchText = [item.name, item.brand, item.model, item.manufacturer_part_number, item.barcode, item.category, item.description, item.storage_location].join(" ").toLowerCase();
+        const searchText = [item.name, item.brand, item.model, item.manufacturer_part_number, item.barcode, item.category, item.description, item.storage_location, ...(item.product_links || []).flatMap((link) => [link.store, link.product_number, link.identifier])].join(" ").toLowerCase();
         return (!query || searchText.includes(query)) && (!category || item.category === category) && (!status || item.availability === status);
       });
     }
@@ -705,13 +718,16 @@
           const links = document.createElement("div");
           links.className = "item-product-links";
           item.product_links.forEach((productLink) => {
-            const link = document.createElement("a");
-            link.href = productLink.product_url;
-            link.target = "_blank";
-            link.rel = "noopener noreferrer";
-            link.textContent = `${productLink.store.replaceAll("_", " ")} product page (${productLink.identifier})`;
             if (links.childNodes.length) links.append(document.createTextNode(" · "));
-            links.appendChild(link);
+            const label = `${productLink.store.replaceAll("_", " ")}${productLink.product_number ? ` #${productLink.product_number}` : ""}${productLink.identifier ? ` (search: ${productLink.identifier})` : ""}`;
+            if (productLink.product_url) {
+              const link = document.createElement("a");
+              link.href = productLink.product_url;
+              link.target = "_blank";
+              link.rel = "noopener noreferrer";
+              link.textContent = `${label} product page`;
+              links.appendChild(link);
+            } else links.append(document.createTextNode(label));
           });
           meta.appendChild(document.createElement("br"));
           meta.appendChild(links);
@@ -1536,6 +1552,10 @@
       $("item-form").reset();
       $("item-id").value = "";
       $("item-intake-id").value = "";
+      $("item-store-reference-list").replaceChildren();
+      $("item-store-references").hidden = true;
+      $("item-evidence-link-list").replaceChildren();
+      $("item-evidence-links").hidden = true;
       ui.activeIntake = null;
       ui.selectedFieldSources = {};
       $("item-legend").textContent = "Add an item";
@@ -1548,6 +1568,44 @@
       $("save-item").textContent = "Save item";
     }
 
+    function addStoreReference(reference = {}) {
+      const row = document.createElement("div");
+      row.className = "product-match-row";
+      if (reference.id) row.dataset.id = reference.id;
+      const grid = document.createElement("div");
+      grid.className = "form-grid";
+      [
+        ["store", "Store", 120, "text"],
+        ["product_number", "Store product number", 120, "text"],
+        ["identifier", "Search identifier (if used)", 120, "text"],
+        ["product_url", "Product-page URL", 2000, "url"],
+      ].forEach(([name, label, maxLength, type]) => {
+        const field = document.createElement("label");
+        field.className = "field";
+        field.append(document.createTextNode(label));
+        const input = document.createElement("input");
+        input.className = "control";
+        input.type = type;
+        input.maxLength = maxLength;
+        input.dataset.referenceField = name;
+        input.value = reference[name] || "";
+        if (name === "store") {
+          input.required = true;
+          input.setAttribute("list", "store-names");
+          input.placeholder = "Choose or enter a store";
+        }
+        field.appendChild(input);
+        grid.appendChild(field);
+      });
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "button button-danger";
+      remove.textContent = "Remove reference";
+      remove.addEventListener("click", () => row.remove());
+      row.append(grid, remove);
+      $("item-store-reference-list").appendChild(row);
+    }
+
     function editItem(item) {
       ui.activeIntake = null;
       ui.selectedFieldSources = {};
@@ -1558,6 +1616,27 @@
         if ($(name).type === "checkbox") $(name).checked = item[name];
         else $(name).value = item[name] ?? "";
       });
+      $("item-store-reference-list").replaceChildren();
+      (item.product_links || []).forEach(addStoreReference);
+      $("item-store-references").hidden = false;
+      const evidenceLinks = $("item-evidence-link-list");
+      evidenceLinks.replaceChildren();
+      (item.price_evidence || []).forEach((evidence) => {
+        const label = document.createElement("label");
+        label.className = "field";
+        label.append(document.createTextNode(`${evidence.title} · ${evidence.source_name} · ${evidence.retrieved_at}`));
+        const input = document.createElement("input");
+        input.className = "control";
+        input.type = "text";
+        input.inputMode = "url";
+        input.maxLength = 2000;
+        input.value = evidence.product_url;
+        input.dataset.evidenceId = evidence.id;
+        input.dataset.originalUrl = evidence.product_url;
+        label.appendChild(input);
+        evidenceLinks.appendChild(label);
+      });
+      $("item-evidence-links").hidden = !evidenceLinks.childElementCount;
       $("item-legend").textContent = "Edit item";
       $("save-item").textContent = "Save changes";
       showView("inventory");
@@ -1673,6 +1752,7 @@
     $("item-search").addEventListener("input", renderItems);
     $("item-category-filter").addEventListener("change", renderItems);
     $("item-status-filter").addEventListener("change", renderItems);
+    $("add-store-reference").addEventListener("click", () => addStoreReference());
 
     $("item-form").addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -1685,6 +1765,19 @@
       });
       const id = $("item-id").value;
       const intakeId = $("item-intake-id").value;
+      if (id) {
+        item.product_links = [...$("item-store-reference-list").children].map((row) => {
+          const reference = {};
+          if (row.dataset.id) reference.id = row.dataset.id;
+          row.querySelectorAll("[data-reference-field]").forEach((input) => {
+            reference[input.dataset.referenceField] = input.value.trim();
+          });
+          return reference;
+        });
+        item.evidence_urls = [...$("item-evidence-link-list").querySelectorAll("input")]
+          .filter((input) => input.value.trim() !== input.dataset.originalUrl)
+          .map((input) => ({ id: input.dataset.evidenceId, product_url: input.value.trim() }));
+      }
       $("save-item").disabled = true;
       try {
         if (intakeId) {

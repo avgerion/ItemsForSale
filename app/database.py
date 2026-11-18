@@ -139,9 +139,10 @@ CREATE TABLE IF NOT EXISTS item_identification_sources (
 CREATE TABLE IF NOT EXISTS item_product_links (
     id TEXT PRIMARY KEY,
     item_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
-    store TEXT NOT NULL CHECK (store IN ('home_depot', 'lowes', 'ebay')),
+    store TEXT NOT NULL,
     identifier TEXT NOT NULL,
     product_url TEXT NOT NULL,
+    product_number TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
 );
 """
@@ -200,6 +201,7 @@ def initialize_database() -> None:
                 connection.execute(
                     f"ALTER TABLE assisted_intakes ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
                 )
+        _upgrade_item_product_links(connection)
         missing_labels = connection.execute(
             "SELECT id FROM items WHERE NOT EXISTS (SELECT 1 FROM item_labels WHERE item_id = items.id)"
         ).fetchall()
@@ -244,6 +246,33 @@ def create_item_label(connection: sqlite3.Connection, item_id: str) -> str:
         "INSERT INTO item_labels(item_id, item_number) VALUES (?, ?)", (item_id, item_number)
     )
     return item_number
+
+
+def _upgrade_item_product_links(connection: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in connection.execute("PRAGMA table_info(item_product_links)")}
+    if "product_number" in columns:
+        return
+    connection.execute(
+        """
+        CREATE TABLE item_product_links_replacement (
+            id TEXT PRIMARY KEY,
+            item_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+            store TEXT NOT NULL,
+            identifier TEXT NOT NULL,
+            product_url TEXT NOT NULL,
+            product_number TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO item_product_links_replacement(id, item_id, store, identifier, product_url, created_at)
+        SELECT id, item_id, store, identifier, product_url, created_at FROM item_product_links
+        """
+    )
+    connection.execute("DROP TABLE item_product_links")
+    connection.execute("ALTER TABLE item_product_links_replacement RENAME TO item_product_links")
 
 
 def _rebuild_categories_with_workspace_uniqueness(connection: sqlite3.Connection) -> None:

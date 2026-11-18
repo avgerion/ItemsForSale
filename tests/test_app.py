@@ -904,6 +904,164 @@ def test_intake_stores_retailer_product_numbers(client, admin_headers):
     assert updated.json()["lowes_product_number"] == "999"
     assert updated.json()["home_depot_product_number"] == "100123456"
 
+    draft = client.post(
+        f"/api/admin/intakes/{intake['id']}/create-draft",
+        headers=admin_headers,
+        json={"item": {"name": "Retailer numbers", "category": "Tools", "condition": "open_box", "asking_price": 5}},
+    )
+    assert draft.status_code == 201, draft.text
+    references = draft.json()["product_links"]
+    assert {(link["store"], link["product_number"], link["product_url"]) for link in references} == {
+        ("lowes", "999", ""), ("home_depot", "100123456", ""),
+    }
+    assert client.get(f"/api/admin/intakes/{intake['id']}", headers=admin_headers).status_code == 404
+    assert client.get("/api/admin/items", headers=admin_headers).json()[0]["product_links"] == references
+
+
+def test_store_references_edit_round_trip_and_privacy(client, admin_headers):
+    item = create_item(client, admin_headers)
+    other_item = create_item(client, admin_headers, name="Other")
+    first = client.patch(
+        f"/api/admin/items/{item['id']}", headers=admin_headers,
+        json={"product_links": [
+            {"store": "lowes", "product_number": "2887500", "product_url": "https://www.lowes.com/pd/item/123"},
+            {"store": "New store", "product_number": "X-42"},
+            {"store": "amazon", "product_url": "https://www.amazon.com/dp/example"},
+        ]},
+    )
+    assert first.status_code == 200, first.text
+    refs = first.json()["product_links"]
+    lowes = next(row for row in refs if row["store"] == "lowes")
+    amazon = next(row for row in refs if row["store"] == "amazon")
+    changed = client.patch(
+        f"/api/admin/items/{item['id']}", headers=admin_headers,
+        json={"product_links": [
+            {"id": lowes["id"], "store": "lowes", "product_number": "corrected",
+             "identifier": "search term", "product_url": "https://www.lowes.com/pd/corrected/456"},
+            {"id": amazon["id"], "store": "amazon", "product_url": "https://www.amazon.com/dp/example"},
+        ]},
+    )
+    assert changed.status_code == 200, changed.text
+    changed_refs = changed.json()["product_links"]
+    assert len(changed_refs) == 2
+    updated = next(row for row in changed_refs if row["id"] == lowes["id"])
+    assert updated["product_number"] == "corrected"
+    assert updated["identifier"] == "search term"
+    assert updated["created_at"] == lowes["created_at"]
+    assert updated["product_url"].endswith("/corrected/456")
+    listed = next(row for row in client.get("/api/admin/items", headers=admin_headers).json() if row["id"] == item["id"])
+    assert listed["product_links"] == changed_refs
+    assert all("product_links" not in row for row in client.get("/api/public/items").json())
+
+    wrong_item = client.patch(
+        f"/api/admin/items/{other_item['id']}", headers=admin_headers,
+        json={"product_links": [{"id": lowes["id"], "store": "lowes", "product_number": "stolen"}]},
+    )
+    assert wrong_item.status_code == 422
+    unrelated = client.patch(f"/api/admin/items/{item['id']}", headers=admin_headers, json={"name": "Renamed"})
+    assert unrelated.json()["product_links"] == changed_refs
+    assert client.patch(f"/api/admin/items/{item['id']}", json={"product_links": []}).status_code == 401
+    cleared = client.patch(f"/api/admin/items/{item['id']}", headers=admin_headers, json={"product_links": []})
+    assert cleared.status_code == 200
+    assert cleared.json()["product_links"] == []
+
+
+@pytest.mark.parametrize("reference", [
+    {"store": "lowes", "product_url": "https://www.lowes.com/search?q=123"},
+    {"store": "lowes", "product_url": "https://lowes.com.evil.example/p/123"},
+    {"store": "Other", "product_url": "javascript:alert(1)"},
+    {"store": "Other", "product_url": "https://user:pass@example.com/item"},
+    {"store": "Other"},
+])
+def test_invalid_store_reference_is_rejected_without_changing_item(client, admin_headers, reference):
+    item = create_item(client, admin_headers)
+    response = client.patch(
+        f"/api/admin/items/{item['id']}", headers=admin_headers,
+        json={"name": "Should not save", "product_links": [reference]},
+    )
+    assert response.status_code == 422
+    listed = client.get("/api/admin/items", headers=admin_headers).json()[0]
+    assert listed["name"] == item["name"]
+    assert listed["product_links"] == []
+
+
+def test_store_reference_database_upgrade_preserves_existing_links(client, admin_headers):
+    item = create_item(client, admin_headers)
+    with database.connect_db() as connection:
+        connection.execute("DROP TABLE item_product_links")
+        connection.execute("""
+            CREATE TABLE item_product_links (
+                id TEXT PRIMARY KEY, item_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+                store TEXT NOT NULL CHECK (store IN ('home_depot', 'lowes', 'ebay')),
+                identifier TEXT NOT NULL, product_url TEXT NOT NULL, created_at TEXT NOT NULL
+            )
+        """)
+        connection.execute(
+            "INSERT INTO item_product_links VALUES (?, ?, ?, ?, ?, ?)",
+            ("legacy", item["id"], "lowes", "barcode", "https://www.lowes.com/pd/item/1", "2026-01-01"),
+        )
+    database.initialize_database()
+    database.initialize_database()
+    links = client.get("/api/admin/items", headers=admin_headers).json()[0]["product_links"]
+    assert links == [{
+        "id": "legacy", "store": "lowes", "identifier": "barcode",
+        "product_url": "https://www.lowes.com/pd/item/1", "product_number": "", "created_at": "2026-01-01",
+    }]
+    response = client.patch(
+        f"/api/admin/items/{item['id']}", headers=admin_headers,
+        json={"product_links": [
+            {"id": "legacy", "store": "lowes", "identifier": "barcode",
+             "product_url": "https://www.lowes.com/pd/item/1", "product_number": "123"},
+            {"store": "Other store", "product_number": "456"},
+        ]},
+    )
+    assert response.status_code == 200, response.text
+    with database.connect_db() as connection:
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_price_evidence_source_url_can_be_corrected_privately(client, admin_headers):
+    item = create_item(client, admin_headers)
+    other_item = create_item(client, admin_headers, name="Other")
+    with database.connect_db() as connection:
+        connection.execute(
+            """
+            INSERT INTO item_price_evidence(
+                id, item_id, evidence_type, title, source_name, product_url,
+                amount_cents, currency, retrieved_at
+            ) VALUES ('evidence-1', ?, 'active_listing', 'Listing', 'Shop', ?, 1250, 'USD', '2026-01-01')
+            """,
+            (item["id"], "https://example.com/old"),
+        )
+    invalid = client.patch(
+        f"/api/admin/items/{item['id']}", headers=admin_headers,
+        json={"product_links": [{"store": "Other", "product_number": "123"}],
+              "evidence_urls": [{"id": "missing", "product_url": "https://example.com/new"}]},
+    )
+    assert invalid.status_code == 422
+    own = next(row for row in client.get("/api/admin/items", headers=admin_headers).json() if row["id"] == item["id"])
+    assert own["product_links"] == []
+    assert own["price_evidence"][0]["product_url"] == "https://example.com/old"
+    assert client.patch(
+        f"/api/admin/items/{other_item['id']}", headers=admin_headers,
+        json={"evidence_urls": [{"id": "evidence-1", "product_url": "https://example.com/new"}]},
+    ).status_code == 422
+    assert client.patch(
+        f"/api/admin/items/{item['id']}", headers=admin_headers,
+        json={"evidence_urls": [{"id": "evidence-1", "product_url": "javascript:alert(1)"}]},
+    ).status_code == 422
+    updated = client.patch(
+        f"/api/admin/items/{item['id']}", headers=admin_headers,
+        json={"evidence_urls": [{"id": "evidence-1", "product_url": "https://example.com/new"}]},
+    )
+    assert updated.status_code == 200
+    own = next(row for row in client.get("/api/admin/items", headers=admin_headers).json() if row["id"] == item["id"])
+    evidence = own["price_evidence"][0]
+    assert evidence["product_url"] == "https://example.com/new"
+    assert evidence["amount"] == 12.5
+    assert evidence["retrieved_at"] == "2026-01-01"
+    assert all("price_evidence" not in row for row in client.get("/api/public/items").json())
+
 
 @pytest.mark.parametrize(
     ("store", "product_url"),

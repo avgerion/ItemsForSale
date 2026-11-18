@@ -86,6 +86,67 @@ ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
 
+def validate_external_url(url: str) -> None:
+    if not url:
+        return
+    try:
+        parsed = urlsplit(url)
+        host = parsed.hostname
+        _ = parsed.port
+    except ValueError as exc:
+        raise ValueError("Enter a valid product URL") from exc
+    if (
+        parsed.scheme not in {"http", "https"} or not host
+        or parsed.username or parsed.password
+        or "\\" in url
+        or any(char.isspace() or ord(char) < 32 for char in url)
+    ):
+        raise ValueError("Product links must be valid HTTP or HTTPS URLs without credentials")
+
+
+class ItemStoreReference(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    id: str | None = Field(default=None, min_length=1, max_length=80)
+    store: str = Field(min_length=1, max_length=120)
+    product_number: str = Field(default="", max_length=120)
+    identifier: str = Field(default="", max_length=120)
+    product_url: str = Field(default="", max_length=2000)
+
+    @model_validator(mode="after")
+    def validate_reference(self) -> "ItemStoreReference":
+        if not (self.product_number or self.identifier or self.product_url):
+            raise ValueError("Provide a product number, search identifier, or product URL")
+        if not self.product_url:
+            return self
+        validate_external_url(self.product_url)
+        parsed = urlsplit(self.product_url)
+        host = (parsed.hostname or "").lower()
+        domains = {"home_depot": "homedepot.com", "lowes": "lowes.com", "ebay": "ebay.com"}
+        domain = domains.get(self.store)
+        if domain and not (host == domain or host.endswith("." + domain)):
+            raise ValueError("Product links must use the selected retailer's website")
+        normalized_path = parsed.path.rstrip("/")
+        search_paths = {"home_depot": {"/s"}, "lowes": {"/search"}, "ebay": {"/sch/i.html"}}
+        if normalized_path in search_paths.get(self.store, set()) or (
+            self.store == "home_depot" and normalized_path.startswith("/s/")
+        ):
+            raise ValueError("Save a product page URL, not a retailer search page")
+        return self
+
+
+class EvidenceUrlUpdate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    id: str = Field(min_length=1, max_length=80)
+    product_url: str = Field(max_length=2000)
+
+    @model_validator(mode="after")
+    def validate_url(self) -> "EvidenceUrlUpdate":
+        validate_external_url(self.product_url)
+        return self
+
+
 class ItemCreate(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
@@ -134,6 +195,8 @@ class ItemUpdate(BaseModel):
     private_notes: str | None = Field(default=None, max_length=5000)
     storage_location: str | None = Field(default=None, max_length=500)
     is_published: bool | None = None
+    product_links: list[ItemStoreReference] | None = Field(default=None, max_length=200)
+    evidence_urls: list[EvidenceUrlUpdate] | None = None
 
 
 class LabelSelection(BaseModel):
@@ -181,37 +244,14 @@ class IntakeLookup(BaseModel):
     photo_ids: list[str] = Field(default_factory=list, max_length=8)
 
 
-class IntakeProductLink(BaseModel):
-    store: Literal["home_depot", "lowes", "ebay"]
+class IntakeProductLink(ItemStoreReference):
     identifier: str = Field(min_length=1, max_length=120)
     product_url: str = Field(min_length=1, max_length=2000)
 
     @model_validator(mode="after")
-    def validate_product_url(self) -> "IntakeProductLink":
-        parsed = urlsplit(self.product_url)
-        host = (parsed.hostname or "").lower()
-        allowed_domains = {
-            "home_depot": "homedepot.com",
-            "lowes": "lowes.com",
-            "ebay": "ebay.com",
-        }
-        domain = allowed_domains[self.store]
-        if (
-            parsed.scheme not in {"http", "https"}
-            or not (host == domain or host.endswith("." + domain))
-            or parsed.username
-            or parsed.password
-        ):
-            raise ValueError("Product links must use the selected retailer's website")
-        search_paths = {
-            "home_depot": {"/s"},
-            "lowes": {"/search"},
-            "ebay": {"/sch/i.html"},
-        }
-        normalized_path = parsed.path.rstrip("/")
-        is_home_depot_search = self.store == "home_depot" and normalized_path.startswith("/s/")
-        if normalized_path in search_paths[self.store] or is_home_depot_search:
-            raise ValueError("Save a product page URL, not a retailer search page")
+    def validate_intake_store(self) -> "IntakeProductLink":
+        if self.store not in {"home_depot", "lowes", "ebay"}:
+            raise ValueError("Unsupported intake retailer")
         return self
 
 
@@ -341,7 +381,7 @@ def item_record(row: sqlite3.Row, *, include_private: bool) -> dict:
 def item_product_links(connection: sqlite3.Connection, item_id: str) -> list[dict]:
     rows = connection.execute(
         """
-        SELECT id, store, identifier, product_url, created_at
+        SELECT id, store, identifier, product_url, product_number, created_at
         FROM item_product_links WHERE item_id = ? ORDER BY created_at, id
         """,
         (item_id,),
@@ -352,6 +392,7 @@ def item_product_links(connection: sqlite3.Connection, item_id: str) -> list[dic
             "store": row["store"],
             "identifier": row["identifier"],
             "product_url": row["product_url"],
+            "product_number": row["product_number"],
             "created_at": row["created_at"],
         }
         for row in rows
@@ -1463,7 +1504,7 @@ def create_draft_from_intake(
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     try:
         with connect_db() as connection:
-            intake_record(connection, intake_id, owner)
+            intake = intake_record(connection, intake_id, owner)
             candidate_ids = set(request.selected_field_sources.values())
             selected_candidates: dict[str, sqlite3.Row] = {}
             for candidate_id in candidate_ids:
@@ -1499,6 +1540,16 @@ def create_draft_from_intake(
                     raise HTTPException(status_code=422, detail="Selected price evidence does not belong to this intake")
 
             item_id, _ = insert_inventory_item(connection, request.item, owner, is_published=False)
+            for store in ("lowes", "home_depot"):
+                product_number = intake[f"{store}_product_number"]
+                if product_number:
+                    connection.execute(
+                        """
+                        INSERT INTO item_product_links(id, item_id, store, identifier, product_url, product_number, created_at)
+                        VALUES (?, ?, ?, '', '', ?, ?)
+                        """,
+                        (str(uuid.uuid4()), item_id, store, product_number, timestamp()),
+                    )
             for field_name, candidate_id in request.selected_field_sources.items():
                 candidate = selected_candidates[candidate_id]
                 source_value = json.loads(candidate["fields_json"])[field_name]
@@ -1835,6 +1886,50 @@ def update_item(
     with connect_db() as connection:
         connection.execute("BEGIN IMMEDIATE")
         existing = fetch_item(connection, item_id, owner)
+        changes.pop("product_links", None)
+        changes.pop("evidence_urls", None)
+        references = update.product_links
+        if "product_links" in update.model_fields_set and references is None:
+            raise HTTPException(status_code=422, detail="product_links cannot be null")
+        if references is not None:
+            existing_ids = {link["id"] for link in item_product_links(connection, item_id)}
+            supplied_ids = [reference.id for reference in references if reference.id is not None]
+            if len(supplied_ids) != len(set(supplied_ids)) or not set(supplied_ids).issubset(existing_ids):
+                raise HTTPException(status_code=422, detail="Invalid or duplicate store reference ID")
+            for reference in references:
+                if reference.id is None:
+                    connection.execute(
+                        """
+                        INSERT INTO item_product_links(id, item_id, store, identifier, product_url, product_number, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (str(uuid.uuid4()), item_id, reference.store, reference.identifier,
+                         reference.product_url, reference.product_number, timestamp()),
+                    )
+                else:
+                    connection.execute(
+                        """
+                        UPDATE item_product_links SET store = ?, identifier = ?, product_url = ?, product_number = ?
+                        WHERE id = ? AND item_id = ?
+                        """,
+                        (reference.store, reference.identifier, reference.product_url,
+                         reference.product_number, reference.id, item_id),
+                    )
+            for removed_id in existing_ids - set(supplied_ids):
+                connection.execute("DELETE FROM item_product_links WHERE id = ? AND item_id = ?", (removed_id, item_id))
+        if "evidence_urls" in update.model_fields_set and update.evidence_urls is None:
+            raise HTTPException(status_code=422, detail="evidence_urls cannot be null")
+        if update.evidence_urls is not None:
+            evidence_ids = [entry.id for entry in update.evidence_urls]
+            if len(evidence_ids) != len(set(evidence_ids)):
+                raise HTTPException(status_code=422, detail="Duplicate price evidence ID")
+            for entry in update.evidence_urls:
+                cursor = connection.execute(
+                    "UPDATE item_price_evidence SET product_url = ? WHERE id = ? AND item_id = ?",
+                    (entry.product_url, entry.id, item_id),
+                )
+                if cursor.rowcount != 1:
+                    raise HTTPException(status_code=422, detail="Price evidence does not belong to this item")
         merged = {
             "name": existing["name"],
             "brand": existing["brand"],
@@ -1903,7 +1998,9 @@ def update_item(
             ),
         )
         row = fetch_item(connection, item_id, owner)
-    return item_record(row, include_private=True)
+        result = item_record(row, include_private=True)
+        result["product_links"] = item_product_links(connection, item_id)
+    return result
 
 
 @app.get("/api/admin/categories")
